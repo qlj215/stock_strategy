@@ -4,6 +4,7 @@ import sys
 import random
 import uuid
 import subprocess
+import threading
 
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
@@ -17,6 +18,7 @@ app = Flask(__name__, static_folder="web", static_url_path="")
 SYMBOL_POOL = ["000858", "600519", "000001", "600036", "300750", "002594", "600276", "603986"]
 CHALLENGES = {}
 REVIEWS = {}
+REPLAY_JOBS = {}
 
 
 def _today_str():
@@ -223,15 +225,11 @@ def answer():
     })
 
 
-@app.route("/api/replay/codex", methods=["POST"])
-def replay_codex():
-    data = request.get_json(force=True)
-    rid = data.get("review_id")
-    if rid not in REVIEWS:
-        return jsonify({"error": "复盘记录不存在"}), 400
-
-    item = REVIEWS[rid]
+def _run_replay_job(job_id: str, review_id: str):
+    item = REVIEWS[review_id]
     prompt = _build_codex_prompt(item)
+    REPLAY_JOBS[job_id]["status"] = "running"
+    REPLAY_JOBS[job_id]["started_at"] = datetime.now().isoformat()
 
     try:
         t0 = datetime.now()
@@ -247,16 +245,50 @@ def replay_codex():
         err = (proc.stderr or "").strip()
 
         if proc.returncode != 0:
-            return jsonify({
+            REPLAY_JOBS[job_id].update({
+                "status": "error",
                 "error": "Codex 调用失败",
                 "detail": err[:500] if err else "unknown",
-            }), 500
+                "elapsed_sec": round(elapsed, 1),
+            })
+            return
 
-        return jsonify({"analysis": out or "Codex未返回内容", "elapsed_sec": round(elapsed, 1)})
+        REPLAY_JOBS[job_id].update({
+            "status": "done",
+            "analysis": out or "Codex未返回内容",
+            "elapsed_sec": round(elapsed, 1),
+        })
     except FileNotFoundError:
-        return jsonify({"error": "未检测到 codex 命令，请先安装并配置。"}), 500
+        REPLAY_JOBS[job_id].update({"status": "error", "error": "未检测到 codex 命令，请先安装并配置。"})
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Codex 分析超时，请重试。"}), 500
+        REPLAY_JOBS[job_id].update({"status": "error", "error": "Codex 分析超时，请重试。"})
+
+
+@app.route("/api/replay/codex", methods=["POST"])
+def replay_codex():
+    data = request.get_json(force=True)
+    rid = data.get("review_id")
+    if rid not in REVIEWS:
+        return jsonify({"error": "复盘记录不存在"}), 400
+
+    job_id = str(uuid.uuid4())
+    REPLAY_JOBS[job_id] = {
+        "status": "queued",
+        "review_id": rid,
+        "created_at": datetime.now().isoformat(),
+    }
+
+    t = threading.Thread(target=_run_replay_job, args=(job_id, rid), daemon=True)
+    t.start()
+
+    return jsonify({"job_id": job_id, "status": "queued"})
+
+
+@app.route("/api/replay/codex/<job_id>", methods=["GET"])
+def replay_codex_status(job_id):
+    if job_id not in REPLAY_JOBS:
+        return jsonify({"error": "任务不存在"}), 404
+    return jsonify(REPLAY_JOBS[job_id])
 
 
 if __name__ == "__main__":

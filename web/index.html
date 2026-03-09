@@ -122,7 +122,7 @@ async function submitAnswer() {
 async function runCodexReplay() {
   if (!lastReviewId) return alert('先提交本题答案，再做深度复盘。');
   document.getElementById('codexBox').style.display = 'block';
-  document.getElementById('codexText').innerText = 'Codex 分析中，请稍等...';
+  document.getElementById('codexText').innerText = 'Codex 任务已提交，分析中...';
 
   const r = await fetch('/api/replay/codex', {
     method:'POST',
@@ -134,7 +134,28 @@ async function runCodexReplay() {
     document.getElementById('codexText').innerText = `调用失败：${d.error}\n${d.detail || ''}`;
     return;
   }
-  document.getElementById('codexText').innerText = d.analysis;
+
+  const jobId = d.job_id;
+  let retry = 0;
+  const timer = setInterval(async () => {
+    retry += 1;
+    const s = await fetch(`/api/replay/codex/${jobId}`);
+    const j = await s.json();
+
+    if (j.status === 'queued' || j.status === 'running') {
+      document.getElementById('codexText').innerText = `Codex 分析中...（${retry * 2}s）`;
+      return;
+    }
+
+    clearInterval(timer);
+
+    if (j.status === 'error') {
+      document.getElementById('codexText').innerText = `调用失败：${j.error || 'unknown'}\n${j.detail || ''}`;
+      return;
+    }
+
+    document.getElementById('codexText').innerText = `${j.analysis}\n\n[耗时 ${j.elapsed_sec || '-'}s]`;
+  }, 2000);
 }
 
 newChallenge();
