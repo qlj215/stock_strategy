@@ -39,6 +39,7 @@
   </div>
 
   <div class="card"><div id="kline" style="height:520px;"></div></div>
+  <div class="card" id="eventsBox"><div class="muted">事件上下文加载中...</div></div>
 
   <div class="card row">
     <label>未来方向：</label>
@@ -71,6 +72,12 @@ async function newChallenge() {
   document.getElementById('codexBox').style.display = 'none';
   document.getElementById('meta').innerText = `标的 ${d.symbol} · 截面日期 ${d.anchor_date} · 预测${d.pred_days}日`;
   document.getElementById('result').innerText = d.prompt;
+
+  const events = d.events || [];
+  const eventsHtml = events.length
+    ? `<b>近期重大事件（复盘参考）</b><ul>${events.map(e => `<li>${e.time}｜${e.title}（${e.source}）</li>`).join('')}</ul>`
+    : '<span class="muted">暂无可用事件数据</span>';
+  document.getElementById('eventsBox').innerHTML = eventsHtml;
 
   const x = d.candles.map(i => i.date);
   const trace = {

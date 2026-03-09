@@ -7,6 +7,7 @@ import subprocess
 
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
+import akshare as ak
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from stock_strategy.data.fetcher import fetch_stock_data
@@ -44,6 +45,25 @@ def _difficulty_window(level: str):
     return 60, 5  # normal
 
 
+def _fetch_event_context(symbol: str, max_items: int = 5):
+    """抓取个股近期新闻作为事件上下文。失败时返回空列表。"""
+    try:
+        news = ak.stock_news_em(symbol=symbol)
+        if news is None or news.empty:
+            return []
+        news = news.head(max_items)
+        items = []
+        for _, r in news.iterrows():
+            items.append({
+                "time": str(r.get("发布时间", "")),
+                "title": str(r.get("新闻标题", "")).strip(),
+                "source": str(r.get("文章来源", "")).strip(),
+            })
+        return items
+    except Exception:
+        return []
+
+
 def _build_codex_prompt(item: dict) -> str:
     # 控制上下文长度，降低大模型超时概率
     candles = item["candles"][-20:]
@@ -51,6 +71,10 @@ def _build_codex_prompt(item: dict) -> str:
         f"{c['date']}, O:{c['open']:.2f}, H:{c['high']:.2f}, L:{c['low']:.2f}, C:{c['close']:.2f}"
         for c in candles
     ])
+    event_lines = "\n".join([
+        f"- {e['time']} | {e['title']}（{e['source']}）" for e in item.get("events", [])
+    ]) or "- 无可用事件数据"
+
     return f"""你是一名严谨的A股技术分析教练。请基于以下历史K线片段分析该样本在截面日后的走势成因。
 
 样本信息：
@@ -61,6 +85,9 @@ def _build_codex_prompt(item: dict) -> str:
 - 实际5日涨跌: {item['ret5_pct']}%
 - 实际方向: {item['truth_direction']}
 - 实际趋势: {item['truth_trend']}
+
+事件上下文（用于解释可能的基本面/政策扰动）：
+{event_lines}
 
 K线数据（最近20根）：
 {ohlc_lines}
@@ -103,6 +130,8 @@ def challenge():
     truth_direction = "上涨" if ret >= 0 else "下跌"
     truth_trend = _trend_label(df, i)
 
+    events = _fetch_event_context(symbol, max_items=5)
+
     cid = str(uuid.uuid4())
     CHALLENGES[cid] = {
         "symbol": symbol,
@@ -120,7 +149,8 @@ def challenge():
                 "close": float(r.close),
             }
             for idx, r in hist.iterrows()
-        ]
+        ],
+        "events": events,
     }
 
     return jsonify({
@@ -130,6 +160,7 @@ def challenge():
         "pred_days": pred_days,
         "level": level,
         "candles": CHALLENGES[cid]["candles"],
+        "events": CHALLENGES[cid]["events"],
         "prompt": f"请根据K线判断：未来{pred_days}个交易日更可能上涨还是下跌？当前走势属于上涨/下跌/震荡？",
     })
 
@@ -173,6 +204,7 @@ def answer():
         "pred_direction": pred_direction,
         "pred_trend": pred_trend,
         "candles": item["candles"],
+        "events": item.get("events", []),
     }
 
     return jsonify({
