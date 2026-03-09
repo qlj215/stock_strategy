@@ -45,7 +45,8 @@ def _difficulty_window(level: str):
 
 
 def _build_codex_prompt(item: dict) -> str:
-    candles = item["candles"][-40:]
+    # 控制上下文长度，降低大模型超时概率
+    candles = item["candles"][-20:]
     ohlc_lines = "\n".join([
         f"{c['date']}, O:{c['open']:.2f}, H:{c['high']:.2f}, L:{c['low']:.2f}, C:{c['close']:.2f}"
         for c in candles
@@ -61,15 +62,15 @@ def _build_codex_prompt(item: dict) -> str:
 - 实际方向: {item['truth_direction']}
 - 实际趋势: {item['truth_trend']}
 
-K线数据（最近40根）：
+K线数据（最近20根）：
 {ohlc_lines}
 
-请输出：
-1) 方向判断的关键证据（3-5条）
-2) 趋势判断的关键证据（3-5条）
-3) 用户判断中的主要偏差与盲点
-4) 下次实战可执行的3条改进规则
-5) 一段50字以内的复盘总结
+请输出（严格控制简洁）：
+1) 方向判断关键证据（最多3条）
+2) 趋势判断关键证据（最多3条）
+3) 用户偏差与盲点（最多2条）
+4) 下次可执行改进（3条）
+5) 30字内总结
 
 要求：中文、结构化、简洁、可执行。
 """
@@ -201,13 +202,15 @@ def replay_codex():
     prompt = _build_codex_prompt(item)
 
     try:
+        t0 = datetime.now()
         proc = subprocess.run(
             ["codex", "exec", prompt],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
             cwd=os.path.dirname(os.path.abspath(__file__)),
         )
+        elapsed = (datetime.now() - t0).total_seconds()
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
 
@@ -217,7 +220,7 @@ def replay_codex():
                 "detail": err[:500] if err else "unknown",
             }), 500
 
-        return jsonify({"analysis": out or "Codex未返回内容"})
+        return jsonify({"analysis": out or "Codex未返回内容", "elapsed_sec": round(elapsed, 1)})
     except FileNotFoundError:
         return jsonify({"error": "未检测到 codex 命令，请先安装并配置。"}), 500
     except subprocess.TimeoutExpired:
