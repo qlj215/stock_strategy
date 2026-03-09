@@ -75,8 +75,8 @@ async function newChallenge() {
 
   const events = d.events || [];
   const eventsHtml = events.length
-    ? `<b>近期重大事件（复盘参考）</b><ul>${events.map(e => `<li>${e.time}｜${e.title}（${e.source}）</li>`).join('')}</ul>`
-    : '<span class="muted">暂无可用事件数据</span>';
+    ? `<b>题目期间重大事件（复盘参考）</b><ul>${events.map(e => `<li>${e.time}｜${e.title}（${e.source}）</li>`).join('')}</ul>`
+    : '<span class="muted">该题目截面附近暂无可用事件数据（已避免使用未来事件）。</span>';
   document.getElementById('eventsBox').innerHTML = eventsHtml;
 
   const x = d.candles.map(i => i.date);

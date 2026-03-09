@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import sys
 import random
@@ -47,15 +47,34 @@ def _difficulty_window(level: str):
     return 60, 5  # normal
 
 
-def _fetch_event_context(symbol: str, max_items: int = 5):
-    """抓取个股近期新闻作为事件上下文。失败时返回空列表。"""
+def _fetch_event_context(symbol: str, anchor_date: str, max_items: int = 5, lookback_days: int = 45):
+    """抓取题目截面日期附近的新闻事件（不是物理当前时间）。"""
     try:
         news = ak.stock_news_em(symbol=symbol)
         if news is None or news.empty:
             return []
-        news = news.head(max_items)
+
+        anchor_dt = pd.to_datetime(anchor_date)
+        start_dt = anchor_dt - timedelta(days=lookback_days)
+
+        news = news.copy()
+        news["发布时间_dt"] = pd.to_datetime(news["发布时间"], errors="coerce")
+        news = news.dropna(subset=["发布时间_dt"]) 
+
+        # 只保留“题目截面日及之前”的事件，避免穿越
+        filt = news[(news["发布时间_dt"] <= anchor_dt) & (news["发布时间_dt"] >= start_dt)]
+
+        # 若窗口内没有，退化为“截面日前最近事件”
+        if filt.empty:
+            filt = news[news["发布时间_dt"] <= anchor_dt]
+
+        if filt.empty:
+            return []
+
+        filt = filt.sort_values("发布时间_dt", ascending=False).head(max_items)
+
         items = []
-        for _, r in news.iterrows():
+        for _, r in filt.iterrows():
             items.append({
                 "time": str(r.get("发布时间", "")),
                 "title": str(r.get("新闻标题", "")).strip(),
@@ -122,7 +141,48 @@ def challenge():
     if len(df) < hist_len + pred_days + 20:
         return jsonify({"error": "样本不足"}), 400
 
-    i = random.randint(hist_len + 20, len(df) - pred_days - 1)
+    require_events = request.args.get("require_events", "1") == "1"
+
+    selected = None
+    max_try = 8
+    low_idx = hist_len + 20
+    high_idx = len(df) - pred_days - 1
+
+    # 优先按新闻时间抽题，确保事件与题目时期一致
+    if require_events:
+        try:
+            news = ak.stock_news_em(symbol=symbol)
+            if news is not None and not news.empty:
+                news = news.copy()
+                news["发布时间_dt"] = pd.to_datetime(news["发布时间"], errors="coerce")
+                news = news.dropna(subset=["发布时间_dt"]) 
+                candidate_dates = news["发布时间_dt"].tolist()
+                random.shuffle(candidate_dates)
+                for dt in candidate_dates[:10]:
+                    i_try = df.index.searchsorted(dt, side="right") - 1
+                    if i_try < low_idx or i_try > high_idx:
+                        continue
+                    anchor_try = str(df.index[i_try].date())
+                    events_try = _fetch_event_context(symbol, anchor_date=anchor_try, max_items=5)
+                    if events_try:
+                        selected = (i_try, anchor_try, events_try)
+                        break
+        except Exception:
+            pass
+
+    # 回退：常规随机抽题
+    for _ in range(max_try):
+        if selected is not None:
+            break
+        i_try = random.randint(low_idx, high_idx)
+        anchor_try = str(df.index[i_try].date())
+        events_try = _fetch_event_context(symbol, anchor_date=anchor_try, max_items=5)
+        if (not require_events) or events_try:
+            selected = (i_try, anchor_try, events_try)
+            break
+        selected = (i_try, anchor_try, events_try)
+
+    i, anchor_date, events = selected
     hist = df.iloc[i - hist_len:i + 1].copy()
 
     current_close = float(df["close"].iloc[i])
@@ -132,12 +192,10 @@ def challenge():
     truth_direction = "上涨" if ret >= 0 else "下跌"
     truth_trend = _trend_label(df, i)
 
-    events = _fetch_event_context(symbol, max_items=5)
-
     cid = str(uuid.uuid4())
     CHALLENGES[cid] = {
         "symbol": symbol,
-        "anchor_date": str(df.index[i].date()),
+        "anchor_date": anchor_date,
         "ret": ret,
         "truth_direction": truth_direction,
         "truth_trend": truth_trend,
@@ -158,11 +216,12 @@ def challenge():
     return jsonify({
         "id": cid,
         "symbol": symbol,
-        "anchor_date": str(df.index[i].date()),
+        "anchor_date": anchor_date,
         "pred_days": pred_days,
         "level": level,
         "candles": CHALLENGES[cid]["candles"],
         "events": CHALLENGES[cid]["events"],
+        "events_mode": "period_matched" if CHALLENGES[cid]["events"] else "not_available",
         "prompt": f"请根据K线判断：未来{pred_days}个交易日更可能上涨还是下跌？当前走势属于上涨/下跌/震荡？",
     })
 
