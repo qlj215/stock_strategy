@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小初·A股实时看板</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; margin:0; background:#0f1220; color:#e8ebff; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 18px; }
+    .card { background:#171b2e; border-radius:14px; padding:16px; margin-bottom:14px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .muted { color:#aab2d7; }
+    button { background:#7c8dff; color:#fff; border:0; border-radius:10px; padding:10px 14px; cursor:pointer; }
+    input, select { padding:8px; border-radius:8px; border:0; }
+    .metric { background:#10152b; border-radius:10px; padding:10px 12px; min-width: 180px; }
+    .metric b { font-size: 20px; }
+    pre { white-space: pre-wrap; background:#10152b; border-radius:10px; padding:12px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h2>📊 小初 · A股实时量价与概率预测</h2>
+  <p class="muted">支持分时 + 近20/60/120交易日走势；输出当日、5日、长期上涨概率，并可用 Codex 给出长思考理由。</p>
+
+  <div class="card row">
+    <label>代码：</label><input id="symbol" value="000001" />
+    <label>窗口：</label>
+    <select id="days">
+      <option value="20">20日</option>
+      <option value="60" selected>60日</option>
+      <option value="120">120日</option>
+      <option value="240">240日</option>
+    </select>
+    <button onclick="loadOverview()">刷新看板</button>
+    <button onclick="loadCodex()">Codex 长思考理由</button>
+    <a href="/" style="color:#aab2d7">返回训练场</a>
+  </div>
+
+  <div class="card row" id="metrics"></div>
+  <div class="card"><div id="dailyChart" style="height:460px"></div></div>
+  <div class="card"><div id="intraChart" style="height:360px"></div></div>
+  <div class="card" id="predict"></div>
+
+  <div class="card">
+    <h3>行业 / 全市场批量对比</h3>
+    <div class="row">
+      <label>模式：</label>
+      <select id="scanMode" onchange="toggleScanMode()">
+        <option value="industry" selected>行业内对比</option>
+        <option value="all">全A股遍历（按成交额优先）</option>
+      </select>
+
+      <span id="industryWrap">
+        <label>行业：</label>
+        <select id="industry"></select>
+      </span>
+
+      <label>样本数上限：</label><input id="scanLimit" type="number" value="30" min="1" max="400" style="width:90px" />
+      <label>排序：</label>
+      <select id="scanSortBy">
+        <option value="next_5d_up" selected>5日上涨概率</option>
+        <option value="today_up">当日上涨概率</option>
+        <option value="long_up">长期上涨概率</option>
+        <option value="pct">当日涨跌幅</option>
+        <option value="turnover">成交额</option>
+      </select>
+      <button onclick="runScan()">开始批量对比</button>
+    </div>
+    <div id="scanResult" class="muted" style="margin-top:10px">等待扫描...</div>
+  </div>
+
+  <div class="card">
+    <h3>历史回测（验证概率模型是否靠谱）</h3>
+    <div class="row">
+      <label>开始：</label><input id="btStart" value="20180101" style="width:110px" />
+      <label>结束：</label><input id="btEnd" value="20260310" style="width:110px" />
+      <label>阈值：</label><input id="btThreshold" type="number" step="0.01" min="0.05" max="0.95" value="0.5" style="width:70px" />
+      <label>长期周期(交易日)：</label><input id="btLong" type="number" min="20" max="120" value="60" style="width:70px" />
+      <button onclick="runBacktest()">运行回测</button>
+    </div>
+    <div id="btSummary" class="muted" style="margin-top:10px">等待回测...</div>
+    <div id="btChart" style="height:320px;margin-top:8px"></div>
+    <div id="btCalib" class="muted" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card" id="codex" style="display:none"><pre id="codexText"></pre></div>
+</div>
+
+<script>
+let state = { symbol: '000001', days: 60 };
+
+function pct(v){ return (v*100).toFixed(1) + '%'; }
+function fmt(n){ return Number(n || 0).toLocaleString(); }
+
+async function loadOverview(){
+  const symbol = document.getElementById('symbol').value.trim();
+  const days = document.getElementById('days').value;
+  state = { symbol, days: Number(days) };
+
+  const r = await fetch(`/api/market/overview?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}`);
+  const d = await r.json();
+  if (d.error) return alert(d.error);
+
+  document.getElementById('metrics').innerHTML = `
+    <div class="metric"><div class="muted">最新日期</div><b>${d.latest.date}</b></div>
+    <div class="metric"><div class="muted">最新价</div><b>${d.latest.close}</b></div>
+    <div class="metric"><div class="muted">涨跌幅</div><b>${d.latest.pct}%</b></div>
+    <div class="metric"><div class="muted">成交量</div><b>${fmt(d.latest.volume)}</b></div>
+    <div class="metric"><div class="muted">成交额</div><b>${fmt(d.latest.turnover)}</b></div>
+  `;
+
+  const x = d.daily.map(i => i.date);
+  Plotly.newPlot('dailyChart', [
+    {
+      x,
+      open: d.daily.map(i => i.open), high: d.daily.map(i => i.high),
+      low: d.daily.map(i => i.low), close: d.daily.map(i => i.close),
+      type:'candlestick', name:'日K',
+      increasing: {line: {color: '#ff5d73'}},
+      decreasing: {line: {color: '#4ac98a'}}
+    },
+    {
+      x, y: d.daily.map(i => i.volume), yaxis:'y2', type:'bar', name:'成交量', marker:{color:'#4c5d9e', opacity:0.4}
+    }
+  ], {
+    paper_bgcolor:'#171b2e', plot_bgcolor:'#171b2e', font:{color:'#e8ebff'},
+    xaxis:{rangeslider:{visible:false}},
+    yaxis:{title:'价格'},
+    yaxis2:{title:'成交量', overlaying:'y', side:'right', showgrid:false}
+  });
+
+  const xi = d.intraday.map(i => i.dt);
+  Plotly.newPlot('intraChart', [
+    {x: xi, y: d.intraday.map(i => i.price), type:'scatter', mode:'lines', name:'分时价', line:{color:'#7c8dff'}},
+    {x: xi, y: d.intraday.map(i => i.avg), type:'scatter', mode:'lines', name:'均价', line:{color:'#f5c542'}},
+    {x: xi, y: d.intraday.map(i => i.volume), yaxis:'y2', type:'bar', name:'分时量', marker:{opacity:0.25}}
+  ], {
+    paper_bgcolor:'#171b2e', plot_bgcolor:'#171b2e', font:{color:'#e8ebff'},
+    yaxis:{title:'价格'}, yaxis2:{title:'成交量', overlaying:'y', side:'right', showgrid:false}
+  });
+
+  const p = d.prediction;
+  document.getElementById('predict').innerHTML = `
+    <h3>概率预测（${d.symbol}）</h3>
+    <div>当日上涨概率：<b>${pct(p.today_up)}</b> ｜ 5日上涨概率：<b>${pct(p.next_5d_up)}</b> ｜ 长期上涨概率：<b>${pct(p.long_up)}</b></div>
+    <ul>${(p.reasons || []).map(r => `<li>${r}</li>`).join('')}</ul>
+    <div class="muted">特征：${JSON.stringify(p.features || {})}</div>
+  `;
+}
+
+async function loadCodex(){
+  document.getElementById('codex').style.display = 'block';
+  document.getElementById('codexText').innerText = 'Codex 分析中，请稍候...';
+
+  const r = await fetch('/api/market/codex_reason', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(state)
+  });
+  const d = await r.json();
+  if (d.error) {
+    document.getElementById('codexText').innerText = '调用失败：' + d.error;
+    return;
+  }
+  document.getElementById('codexText').innerText = d.analysis || '无返回内容';
+}
+
+function toggleScanMode(){
+  const mode = document.getElementById('scanMode').value;
+  document.getElementById('industryWrap').style.display = mode === 'industry' ? 'inline-flex' : 'none';
+}
+
+async function loadSectors(){
+  const r = await fetch('/api/market/sectors');
+  const d = await r.json();
+  const sel = document.getElementById('industry');
+  if (d.error) {
+    sel.innerHTML = '<option>获取失败</option>';
+    return;
+  }
+  const sectors = d.sectors || [];
+  sel.innerHTML = sectors.map(s => `<option>${s}</option>`).join('');
+}
+
+async function runScan(){
+  const mode = document.getElementById('scanMode').value;
+  const industry = document.getElementById('industry').value;
+  const limit = document.getElementById('scanLimit').value;
+  const sortBy = document.getElementById('scanSortBy').value;
+  const days = document.getElementById('days').value;
+
+  const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days });
+  if (mode === 'industry') params.set('industry', industry);
+
+  document.getElementById('scanResult').innerHTML = '扫描中，请稍候（样本越大越慢）...';
+
+  const r = await fetch('/api/market/scan?' + params.toString());
+  const d = await r.json();
+  if (d.error) {
+    document.getElementById('scanResult').innerText = '扫描失败：' + d.error;
+    return;
+  }
+
+  const rows = d.top || [];
+  if (!rows.length) {
+    document.getElementById('scanResult').innerText = '没有可用结果';
+    return;
+  }
+
+  const html = `
+    <div class="muted">范围：${d.industry} ｜ 请求 ${d.requested} ｜ 成功 ${d.success} ｜ 失败 ${d.failed}</div>
+    <div style="overflow:auto;margin-top:8px">
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:6px">代码</th>
+            <th style="text-align:left;padding:6px">名称</th>
+            <th style="text-align:right;padding:6px">收盘</th>
+            <th style="text-align:right;padding:6px">涨跌%</th>
+            <th style="text-align:right;padding:6px">当日上涨概率</th>
+            <th style="text-align:right;padding:6px">5日上涨概率</th>
+            <th style="text-align:right;padding:6px">长期上涨概率</th>
+            <th style="text-align:right;padding:6px">成交额</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td style="padding:6px">${r.symbol || ''}</td>
+              <td style="padding:6px">${r.name || '-'}</td>
+              <td style="padding:6px;text-align:right">${r.close ?? '-'}</td>
+              <td style="padding:6px;text-align:right">${r.pct ?? '-'}%</td>
+              <td style="padding:6px;text-align:right">${pct(r.today_up || 0)}</td>
+              <td style="padding:6px;text-align:right">${pct(r.next_5d_up || 0)}</td>
+              <td style="padding:6px;text-align:right">${pct(r.long_up || 0)}</td>
+              <td style="padding:6px;text-align:right">${fmt(r.turnover || 0)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  document.getElementById('scanResult').innerHTML = html;
+}
+
+async function runBacktest(){
+  const symbol = document.getElementById('symbol').value.trim();
+  const start = document.getElementById('btStart').value.trim();
+  const end = document.getElementById('btEnd').value.trim();
+  const threshold = document.getElementById('btThreshold').value;
+  const longH = document.getElementById('btLong').value;
+
+  document.getElementById('btSummary').innerText = '回测运行中，请稍候...';
+  document.getElementById('btCalib').innerText = '';
+
+  const params = new URLSearchParams({ symbol, start, end, threshold, long_horizon: longH });
+  const r = await fetch('/api/market/backtest?' + params.toString());
+  const d = await r.json();
+
+  if (d.error) {
+    document.getElementById('btSummary').innerText = '回测失败：' + d.error;
+    return;
+  }
+
+  const c = d.classification || {};
+  const s = d.strategy || {};
+
+  const fmtMetric = (x) => x == null ? '-' : Number(x).toFixed(4);
+
+  document.getElementById('btSummary').innerHTML = `
+    <div>样本数：<b>${d.window.samples}</b> ｜ 区间：${d.window.start}~${d.window.end}</div>
+    <div style="overflow:auto;margin-top:8px">
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:6px">周期</th>
+            <th style="text-align:right;padding:6px">Accuracy</th>
+            <th style="text-align:right;padding:6px">F1</th>
+            <th style="text-align:right;padding:6px">Brier</th>
+            <th style="text-align:right;padding:6px">策略收益</th>
+            <th style="text-align:right;padding:6px">买入持有收益</th>
+            <th style="text-align:right;padding:6px">Sharpe</th>
+            <th style="text-align:right;padding:6px">MaxDD</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td style="padding:6px">1日</td><td style="padding:6px;text-align:right">${fmtMetric(c.d1?.accuracy)}</td><td style="padding:6px;text-align:right">${fmtMetric(c.d1?.f1)}</td><td style="padding:6px;text-align:right">${fmtMetric(c.d1?.brier)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d1?.strategy_total_return)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d1?.buyhold_total_return)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d1?.strategy_sharpe)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d1?.max_drawdown)}</td></tr>
+          <tr><td style="padding:6px">5日</td><td style="padding:6px;text-align:right">${fmtMetric(c.d5?.accuracy)}</td><td style="padding:6px;text-align:right">${fmtMetric(c.d5?.f1)}</td><td style="padding:6px;text-align:right">${fmtMetric(c.d5?.brier)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d5?.strategy_total_return)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d5?.buyhold_total_return)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d5?.strategy_sharpe)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.d5?.max_drawdown)}</td></tr>
+          <tr><td style="padding:6px">长期</td><td style="padding:6px;text-align:right">${fmtMetric(c.long?.accuracy)}</td><td style="padding:6px;text-align:right">${fmtMetric(c.long?.f1)}</td><td style="padding:6px;text-align:right">${fmtMetric(c.long?.brier)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.long?.strategy_total_return)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.long?.buyhold_total_return)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.long?.strategy_sharpe)}</td><td style="padding:6px;text-align:right">${fmtMetric(s.long?.max_drawdown)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  const pts = (d.strategy?.d5?.points || []);
+  Plotly.newPlot('btChart', [
+    { x: pts.map(i => i.date), y: pts.map(i => i.strategy), type:'scatter', mode:'lines', name:'策略净值(5日)' },
+    { x: pts.map(i => i.date), y: pts.map(i => i.buyhold), type:'scatter', mode:'lines', name:'买入持有净值(5日)' }
+  ], { paper_bgcolor:'#171b2e', plot_bgcolor:'#171b2e', font:{color:'#e8ebff'} });
+
+  const cal = d.calibration?.d5 || [];
+  document.getElementById('btCalib').innerHTML = '5日概率校准（分桶）: ' +
+    cal.map(x => `${x.bin} 样本${x.count} 预测${(x.avg_prob*100).toFixed(1)}% 实际${(x.real_up_rate*100).toFixed(1)}%`).join(' ｜ ');
+}
+
+loadOverview();
+loadSectors();
+toggleScanMode();
+</script>
+</body>
+</html>
