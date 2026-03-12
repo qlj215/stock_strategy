@@ -3,6 +3,7 @@ import os
 import sys
 import random
 import uuid
+import json
 import subprocess
 import threading
 from typing import Dict, Tuple
@@ -665,6 +666,64 @@ def market_sectors():
         return jsonify({"error": f"获取行业列表失败: {str(e)}"}), 500
 
 
+def _is_proxy_error(exc: Exception) -> bool:
+    msg = str(exc)
+    keys = [
+        "ProxyError",
+        "Unable to connect to proxy",
+        "Remote end closed connection without response",
+        "Max retries exceeded",
+    ]
+    return any(k in msg for k in keys)
+
+
+def _stock_zh_a_spot_em_no_proxy_subprocess() -> pd.DataFrame:
+    """
+    仅在检测到代理链路错误时使用：在子进程里清空代理环境变量后调用 akshare。
+    这样不会修改当前进程（及其他进程）的代理配置。
+    """
+    script = r'''
+import json
+import akshare as ak
+
+df = ak.stock_zh_a_spot_em()
+print(df.to_json(orient="records", force_ascii=False))
+'''
+    env = os.environ.copy()
+    for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"]:
+        env.pop(k, None)
+
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=45,
+        env=env,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or "")[:400]
+        raise RuntimeError(f"无代理子进程拉取全市场快照失败: {detail or 'unknown'}")
+
+    out = (proc.stdout or "").strip()
+    if not out:
+        return pd.DataFrame()
+
+    records = json.loads(out)
+    return pd.DataFrame(records)
+
+
+def _stock_zh_a_spot_em_with_fallback() -> pd.DataFrame:
+    """优先按当前网络配置请求；若代理链路异常，则仅本次请求降级为无代理子进程重试。"""
+    try:
+        return ak.stock_zh_a_spot_em()
+    except Exception as e:
+        if not _is_proxy_error(e):
+            raise
+        return _stock_zh_a_spot_em_no_proxy_subprocess()
+
+
 @app.route("/api/market/scan")
 def market_scan():
     mode = (request.args.get("mode") or "industry").strip()  # industry | all
@@ -690,7 +749,7 @@ def market_scan():
             symbols = [str(x).zfill(6) for x in cons[code_col].dropna().tolist()]
 
         elif mode == "all":
-            spot = ak.stock_zh_a_spot_em()
+            spot = _stock_zh_a_spot_em_with_fallback()
             code_col = _pick_col(spot, ["代码", "symbol"])
             turnover_col = _pick_col(spot, ["成交额", "amount", "turnover"])
             name_col = _pick_col(spot, ["名称", "name"])
