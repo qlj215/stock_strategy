@@ -677,6 +677,11 @@ def _is_proxy_error(exc: Exception) -> bool:
     return any(k in msg for k in keys)
 
 
+def _tail_text(s: str, max_len: int = 600) -> str:
+    s = (s or "").strip()
+    return s[-max_len:] if len(s) > max_len else s
+
+
 def _stock_zh_a_spot_em_no_proxy_subprocess() -> pd.DataFrame:
     """
     仅在检测到代理链路错误时使用：在子进程里清空代理环境变量后调用 akshare。
@@ -703,7 +708,7 @@ print(df.to_json(orient="records", force_ascii=False))
     )
 
     if proc.returncode != 0:
-        detail = (proc.stderr or "")[:400]
+        detail = _tail_text(proc.stderr or "", 900)
         raise RuntimeError(f"无代理子进程拉取全市场快照失败: {detail or 'unknown'}")
 
     out = (proc.stdout or "").strip()
@@ -715,13 +720,25 @@ print(df.to_json(orient="records", force_ascii=False))
 
 
 def _stock_zh_a_spot_em_with_fallback() -> pd.DataFrame:
-    """优先按当前网络配置请求；若代理链路异常，则仅本次请求降级为无代理子进程重试。"""
+    """
+    全市场快照获取顺序：
+    1) EM 源（当前网络配置）
+    2) EM 源（无代理子进程）
+    3) 非 EM 备用源（ak.stock_zh_a_spot）
+
+    仅在代理链路错误时触发回退，且不修改当前进程全局代理配置。
+    """
     try:
         return ak.stock_zh_a_spot_em()
     except Exception as e:
         if not _is_proxy_error(e):
             raise
-        return _stock_zh_a_spot_em_no_proxy_subprocess()
+
+        try:
+            return _stock_zh_a_spot_em_no_proxy_subprocess()
+        except Exception:
+            # EM 源仍失败时，回退到备用全市场快照源
+            return ak.stock_zh_a_spot()
 
 
 @app.route("/api/market/scan")
