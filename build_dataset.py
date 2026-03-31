@@ -1,13 +1,36 @@
 #!/usr/bin/env python
 """
-阶段2：研究数据集构建脚本
+阶段2：研究数据集构建脚本（build_dataset.py）
 
-目标：把 MiniQMT/xtdata 的日频数据整理为可训练的标准面板数据。
+目标：
+- 把 MiniQMT/xtdata 的日频数据整理为可训练的标准面板数据。
 
-输出：
+输入：
+- 行情来源：stock_strategy.data.fetcher.fetch_stock_data（MiniQMT + xtdata）
+- 股票池：--symbols（手工指定）或 --limit（自动拉取上限）
+- 时间区间：--start / --end
+
+输出（默认路径）：
 - data/processed/daily_panel.parquet
 - data/processed/split_manifest.json
 - data/processed/data_dictionary.md
+
+调参速查（优先顺序）：
+1) 样本规模：
+   - 快速验证：--limit 20
+   - 正式研究：--limit 100~500（视机器与时长）
+2) 时间跨度：
+   - 先 3~5 年验证，再扩到 8~10 年
+3) 复权口径：
+   - 默认 qfq；与下游训练/回测口径保持一致
+4) 稳定性：
+   - 网络不稳时提高 --retries（如 3~5）
+5) 日历补齐：
+   - 默认补齐并集交易日历（推荐）
+   - 用 --no-union-calendar 可关闭
+6) 数据切分：
+   - 默认 train/val/test = 0.70/0.15/0.15
+   - 调参时保证 train_ratio + val_ratio < 1
 """
 
 from __future__ import annotations
@@ -273,21 +296,41 @@ def write_data_dictionary(path: Path):
 
 
 def main():
-    p = argparse.ArgumentParser(description="阶段2：研究数据集构建")
+    p = argparse.ArgumentParser(
+        description="阶段2：研究数据集构建",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "示例：\n"
+            "  python build_dataset.py --start 20200101 --end 20260331 --limit 20\n"
+            "  python build_dataset.py --symbols 000001,600519,300750 --start 20180101 --end 20260331\n"
+            "\n"
+            "调参建议：\n"
+            "  1) 先小样本验证：--limit 20\n"
+            "  2) 再扩样本规模：--limit 100~500\n"
+            "  3) train/val 需满足 train_ratio + val_ratio < 1\n"
+        ),
+    )
     p.add_argument("--start", default="20200101", help="开始日期 YYYYMMDD")
     p.add_argument("--end", default=datetime.now().strftime("%Y%m%d"), help="结束日期 YYYYMMDD")
-    p.add_argument("--symbols", default="", help="逗号分隔股票代码，空则自动取股票池")
-    p.add_argument("--limit", type=int, default=60, help="自动股票池数量上限")
+    p.add_argument("--symbols", default="", help="逗号分隔股票代码；为空时自动从 MiniQMT 股票池获取")
+    p.add_argument("--limit", type=int, default=60, help="自动股票池数量上限（建议：快速=20，研究=100~500）")
     p.add_argument("--adjust", default="qfq", choices=["qfq", "hfq", "none"], help="复权口径")
-    p.add_argument("--retries", type=int, default=2)
-    p.add_argument("--cache-dir", default="output/cache")
-    p.add_argument("--out", default="data/processed/daily_panel.parquet")
-    p.add_argument("--split-out", default="data/processed/split_manifest.json")
-    p.add_argument("--dict-out", default="data/processed/data_dictionary.md")
-    p.add_argument("--train-ratio", type=float, default=0.7)
-    p.add_argument("--val-ratio", type=float, default=0.15)
-    p.add_argument("--no-union-calendar", action="store_true", help="不做并集日历补齐")
+    p.add_argument("--retries", type=int, default=2, help="单标的数据拉取重试次数（网络不稳可提高到 3~5）")
+    p.add_argument("--cache-dir", default="output/cache", help="拉取阶段缓存目录")
+    p.add_argument("--out", default="data/processed/daily_panel.parquet", help="面板数据输出路径")
+    p.add_argument("--split-out", default="data/processed/split_manifest.json", help="时间切分清单输出路径")
+    p.add_argument("--dict-out", default="data/processed/data_dictionary.md", help="字段字典输出路径")
+    p.add_argument("--train-ratio", type=float, default=0.7, help="训练集日期占比")
+    p.add_argument("--val-ratio", type=float, default=0.15, help="验证集日期占比")
+    p.add_argument("--no-union-calendar", action="store_true", help="不做并集日历补齐（默认开启补齐）")
     args = p.parse_args()
+
+    if not (0.0 < args.train_ratio < 1.0):
+        raise SystemExit("[ERROR] --train-ratio 必须在 (0,1) 区间")
+    if not (0.0 <= args.val_ratio < 1.0):
+        raise SystemExit("[ERROR] --val-ratio 必须在 [0,1) 区间")
+    if args.train_ratio + args.val_ratio >= 1.0:
+        raise SystemExit("[ERROR] --train-ratio + --val-ratio 必须 < 1")
 
     symbols = resolve_symbols(args.symbols, args.limit)
     if not symbols:
@@ -337,6 +380,7 @@ def main():
     print("[DONE] stage2 dataset built")
     print(f"  panel : {out_path}")
     print(f"  split : {split_path}")
+    print(f"  dict  : {Path(args.dict_out)}")
     print(f"  rows  : {len(panel)}")
     print(f"  stocks: {panel['stock_code'].nunique()}")
     print(f"  days  : {panel['date'].nunique()}")

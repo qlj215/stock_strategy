@@ -19,6 +19,7 @@
 - 数据：`data/processed/daily_panel.parquet`
 - 切分：`data/processed/split_manifest.json`
 - 字典：`data/processed/data_dictionary.md`
+- 说明报告：`report/阶段2_build_dataset模块调参与输入输出说明.md`
 
 ### 本次实跑结果（2026-03-31）
 
