@@ -10,14 +10,27 @@ from typing import Dict, Tuple
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
 import numpy as np
-import akshare as ak
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from stock_strategy.data.fetcher import fetch_stock_data
+from stock_strategy.data.fetcher import (
+    fetch_stock_data,
+    fetch_intraday_data,
+    list_a_share_symbols,
+    get_realtime_snapshots,
+    get_symbol_name,
+)
 
 app = Flask(__name__, static_folder="web", static_url_path="")
 
 SYMBOL_POOL = ["000858", "600519", "000001", "600036", "300750", "002594", "600276", "603986"]
+# 行业扫描在 MiniQMT 场景下使用本地行业池（可按需扩展）
+SECTOR_SYMBOLS = {
+    "银行": ["000001", "600036"],
+    "白酒": ["600519", "000858"],
+    "新能源": ["002594", "300750"],
+    "半导体": ["603986", "688981"],
+    "医药": ["600276", "300760"],
+}
 CHALLENGES = {}
 REVIEWS = {}
 REPLAY_JOBS = {}
@@ -49,42 +62,49 @@ def _difficulty_window(level: str):
     return 60, 5  # normal
 
 
-def _fetch_event_context(symbol: str, anchor_date: str, max_items: int = 5, lookback_days: int = 45):
-    """抓取题目截面日期附近的新闻事件（不是物理当前时间）。"""
+def _daily_from_fetcher(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """统一把 fetch_stock_data 返回的 index 结构转成 trainer 需要的列结构。"""
+    idx_df = fetch_stock_data(symbol, start, end, adjust="qfq", retries=2)
+    if idx_df is None or idx_df.empty:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "turnover", "pct"])
+
+    df = idx_df.copy().reset_index()
+    if "date" not in df.columns:
+        # 兼容极少数 index 名称不是 date 的情况
+        df = df.rename(columns={df.columns[0]: "date"})
+
+    for c in ["open", "high", "low", "close", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+
+    if "turnover" not in df.columns:
+        # fetch_stock_data 默认返回不含成交额，先置 0
+        df["turnover"] = 0.0
+    df["turnover"] = pd.to_numeric(df["turnover"], errors="coerce").fillna(0.0)
+
+    df["pct"] = df["close"].pct_change() * 100
+    return df[["date", "open", "high", "low", "close", "volume", "turnover", "pct"]]
+
+
+def _intraday_from_fetcher(symbol: str, count: int = 240) -> pd.DataFrame:
     try:
-        news = ak.stock_news_em(symbol=symbol)
-        if news is None or news.empty:
-            return []
-
-        anchor_dt = pd.to_datetime(anchor_date)
-        start_dt = anchor_dt - timedelta(days=lookback_days)
-
-        news = news.copy()
-        news["发布时间_dt"] = pd.to_datetime(news["发布时间"], errors="coerce")
-        news = news.dropna(subset=["发布时间_dt"]) 
-
-        # 只保留“题目截面日及之前”的事件，避免穿越
-        filt = news[(news["发布时间_dt"] <= anchor_dt) & (news["发布时间_dt"] >= start_dt)]
-
-        # 若窗口内没有，退化为“截面日前最近事件”
-        if filt.empty:
-            filt = news[news["发布时间_dt"] <= anchor_dt]
-
-        if filt.empty:
-            return []
-
-        filt = filt.sort_values("发布时间_dt", ascending=False).head(max_items)
-
-        items = []
-        for _, r in filt.iterrows():
-            items.append({
-                "time": str(r.get("发布时间", "")),
-                "title": str(r.get("新闻标题", "")).strip(),
-                "source": str(r.get("文章来源", "")).strip(),
-            })
-        return items
+        out = fetch_intraday_data(symbol, period="1m", count=count)
+        if out is None or out.empty:
+            return pd.DataFrame(columns=["dt", "price", "volume", "avg"])
+        return out[["dt", "price", "volume", "avg"]].copy()
     except Exception:
-        return []
+        return pd.DataFrame(columns=["dt", "price", "volume", "avg"])
+
+
+def _fetch_event_context(symbol: str, anchor_date: str, max_items: int = 5, lookback_days: int = 45):
+    """
+    MiniQMT/xtdata 当前不直接提供 AKShare 风格新闻流接口。
+    为避免引入公网抓取，本函数在迁移版中返回空事件列表。
+    """
+    return []
 
 
 def _build_codex_prompt(item: dict) -> str:
@@ -150,27 +170,7 @@ def challenge():
     low_idx = hist_len + 20
     high_idx = len(df) - pred_days - 1
 
-    # 优先按新闻时间抽题，确保事件与题目时期一致
-    if require_events:
-        try:
-            news = ak.stock_news_em(symbol=symbol)
-            if news is not None and not news.empty:
-                news = news.copy()
-                news["发布时间_dt"] = pd.to_datetime(news["发布时间"], errors="coerce")
-                news = news.dropna(subset=["发布时间_dt"]) 
-                candidate_dates = news["发布时间_dt"].tolist()
-                random.shuffle(candidate_dates)
-                for dt in candidate_dates[:10]:
-                    i_try = df.index.searchsorted(dt, side="right") - 1
-                    if i_try < low_idx or i_try > high_idx:
-                        continue
-                    anchor_try = str(df.index[i_try].date())
-                    events_try = _fetch_event_context(symbol, anchor_date=anchor_try, max_items=5)
-                    if events_try:
-                        selected = (i_try, anchor_try, events_try)
-                        break
-        except Exception:
-            pass
+    # MiniQMT 迁移后不依赖公网新闻接口，直接走K线随机抽题
 
     # 回退：常规随机抽题
     for _ in range(max_try):
@@ -535,17 +535,11 @@ def market_overview():
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
 
     try:
-        daily_raw = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-        daily = _norm_daily_df(daily_raw).tail(days)
+        daily = _daily_from_fetcher(symbol, start, end).tail(days)
         if daily.empty:
             return jsonify({"error": "未获取到日线数据"}), 400
 
-        try:
-            intraday_raw = ak.stock_zh_a_hist_min_em(symbol=symbol, period="1", adjust="")
-        except Exception:
-            intraday_raw = pd.DataFrame()
-
-        intraday = _norm_intraday_df(intraday_raw)
+        intraday = _intraday_from_fetcher(symbol, count=240)
 
         model_result = _probability_model(daily)
         latest = daily.iloc[-1]
@@ -602,17 +596,11 @@ def market_codex_reason():
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
 
-    daily_raw = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-    daily = _norm_daily_df(daily_raw).tail(days)
+    daily = _daily_from_fetcher(symbol, start, end).tail(days)
     if daily.empty:
         return jsonify({"error": "未获取到日线数据"}), 400
 
-    try:
-        intraday_raw = ak.stock_zh_a_hist_min_em(symbol=symbol, period="1", adjust="")
-    except Exception:
-        intraday_raw = pd.DataFrame()
-
-    intraday = _norm_intraday_df(intraday_raw)
+    intraday = _intraday_from_fetcher(symbol, count=240)
     model_result = _probability_model(daily)
 
     analysis, err = _run_market_codex_reason(symbol, daily, intraday, model_result)
@@ -632,8 +620,7 @@ def _to_float(v, default=0.0):
 def _calc_symbol_snapshot(symbol: str, days: int = 60) -> Dict:
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
-    daily_raw = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-    daily = _norm_daily_df(daily_raw).tail(days)
+    daily = _daily_from_fetcher(symbol, start, end).tail(days)
     if daily.empty:
         return {}
 
@@ -654,15 +641,9 @@ def _calc_symbol_snapshot(symbol: str, days: int = 60) -> Dict:
 
 @app.route("/api/market/sectors")
 def market_sectors():
-    try:
-        df = ak.stock_board_industry_name_em()
-        col = _pick_col(df, ["板块名称", "板块", "name"])
-        if not col:
-            return jsonify({"error": "行业列表字段识别失败"}), 500
-        names = sorted([str(x).strip() for x in df[col].dropna().tolist() if str(x).strip()])
-        return jsonify({"sectors": names})
-    except Exception as e:
-        return jsonify({"error": f"获取行业列表失败: {str(e)}"}), 500
+    # MiniQMT 版行业列表：使用本地配置池，避免公网接口波动
+    names = sorted(SECTOR_SYMBOLS.keys())
+    return jsonify({"sectors": names})
 
 
 @app.route("/api/market/scan")
@@ -679,37 +660,35 @@ def market_scan():
 
     try:
         symbols = []
+        names_map = {}
+        snapshots = {}
 
         if mode == "industry":
             if not industry:
                 return jsonify({"error": "industry 模式需要 industry 参数"}), 400
-            cons = ak.stock_board_industry_cons_em(symbol=industry)
-            code_col = _pick_col(cons, ["代码", "股票代码", "symbol"])
-            if not code_col:
-                return jsonify({"error": "行业成分股字段识别失败"}), 500
-            symbols = [str(x).zfill(6) for x in cons[code_col].dropna().tolist()]
+            if industry not in SECTOR_SYMBOLS:
+                return jsonify({"error": f"不支持的行业：{industry}（可选：{', '.join(sorted(SECTOR_SYMBOLS.keys()))}）"}), 400
+            symbols = [str(x).zfill(6) for x in SECTOR_SYMBOLS[industry]][:limit]
+            names_map = {s: get_symbol_name(s) for s in symbols}
 
         elif mode == "all":
-            spot = ak.stock_zh_a_spot_em()
-            code_col = _pick_col(spot, ["代码", "symbol"])
-            turnover_col = _pick_col(spot, ["成交额", "amount", "turnover"])
-            name_col = _pick_col(spot, ["名称", "name"])
-            if not code_col:
-                return jsonify({"error": "全市场代码字段识别失败"}), 500
+            all_symbols = list_a_share_symbols()
+            if not all_symbols:
+                return jsonify({"error": "无法获取全A股列表，请确认 MiniQMT 已连接且行情可用。"}), 500
 
-            if turnover_col:
-                spot = spot.copy()
-                spot["_turnover"] = pd.to_numeric(spot[turnover_col], errors="coerce").fillna(0)
-                spot = spot.sort_values("_turnover", ascending=False)
+            snapshots = get_realtime_snapshots(all_symbols, chunk_size=800)
+            if not snapshots:
+                return jsonify({"error": "无法获取全市场实时快照，请稍后重试。"}), 500
 
-            symbols = [str(x).zfill(6) for x in spot[code_col].dropna().tolist()][:limit]
-            names_map = {str(r[code_col]).zfill(6): str(r[name_col]) for _, r in spot.iterrows()} if name_col else {}
+            ranked = sorted(
+                snapshots.items(),
+                key=lambda kv: _to_float((kv[1] or {}).get("amount"), 0.0),
+                reverse=True,
+            )
+            symbols = [code for code, _ in ranked[:limit]]
+            names_map = {s: get_symbol_name(s) for s in symbols}
         else:
             return jsonify({"error": "mode 仅支持 industry 或 all"}), 400
-
-        if mode == "industry":
-            symbols = symbols[:limit]
-            names_map = {}
 
         rows = []
         failed = []
@@ -719,7 +698,19 @@ def market_scan():
                 if not item:
                     failed.append(s)
                     continue
-                if s in names_map:
+
+                # all 模式下优先使用实时快照的最新价/成交额
+                if mode == "all":
+                    snap = snapshots.get(s, {})
+                    if snap:
+                        last_price = _to_float(snap.get("lastPrice"), 0.0)
+                        amount = _to_float(snap.get("amount"), 0.0)
+                        if last_price > 0:
+                            item["close"] = round(last_price, 3)
+                        if amount > 0:
+                            item["turnover"] = amount
+
+                if names_map.get(s):
                     item["name"] = names_map[s]
                 rows.append(item)
             except Exception:
@@ -878,8 +869,7 @@ def market_backtest():
     long_horizon = max(20, min(int(request.args.get("long_horizon", "60")), 120))
 
     try:
-        daily_raw = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-        daily = _norm_daily_df(daily_raw)
+        daily = _daily_from_fetcher(symbol, start, end)
         if len(daily) < min_history + long_horizon + 10:
             return jsonify({"error": "历史样本不足，无法回测。请扩大时间区间。"}), 400
 
