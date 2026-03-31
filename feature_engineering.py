@@ -352,6 +352,14 @@ def main():
         if c in feat.columns
     }
 
+    industry_nonnull_ratio = float(1.0 - feat["industry"].isna().mean()) if "industry" in feat.columns and len(feat) else 0.0
+    rel_ind_eq_mkt_ratio = {}
+    for h in [1, 5]:
+        a = f"rel_ind_ret_{h}"
+        b = f"rel_mkt_ret_{h}"
+        if a in feat.columns and b in feat.columns and len(feat):
+            rel_ind_eq_mkt_ratio[f"{h}d"] = float((feat[a].fillna(0).round(10) == feat[b].fillna(0).round(10)).mean())
+
     manifest = {
         "generated_at": datetime.now().isoformat(),
         "input_path": str(in_path),
@@ -369,6 +377,8 @@ def main():
         "feature_cols": FEATURE_COLS,
         "label_cols": label_cols,
         "feature_missing_ratio": missing_ratio,
+        "industry_nonnull_ratio": industry_nonnull_ratio,
+        "rel_ind_eq_rel_mkt_ratio": rel_ind_eq_mkt_ratio,
     }
 
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -381,6 +391,9 @@ def main():
     print(f"  rows     : {len(feat)}")
     print(f"  stocks   : {feat['stock_code'].nunique() if 'stock_code' in feat.columns else 0}")
     print(f"  days     : {feat['date'].nunique() if 'date' in feat.columns else 0}")
+    print(f"  industry_nonnull_ratio: {industry_nonnull_ratio:.4f}")
+    if rel_ind_eq_mkt_ratio:
+        print(f"  rel_ind_eq_rel_mkt_ratio: {rel_ind_eq_mkt_ratio}")
 
 
 if __name__ == "__main__":

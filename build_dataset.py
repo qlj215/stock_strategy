@@ -1,34 +1,39 @@
 #!/usr/bin/env python
 """
-阶段2：研究数据集构建脚本（build_dataset.py）
+阶段2:研究数据集构建脚本(build_dataset.py)
 
-目标：
+目标:
 - 把 MiniQMT/xtdata 的日频数据整理为可训练的标准面板数据。
 
-输入：
-- 行情来源：stock_strategy.data.fetcher.fetch_stock_data（MiniQMT + xtdata）
-- 股票池：--symbols（手工指定）或 --limit（自动拉取上限）
-- 时间区间：--start / --end
+输入:
+- 行情来源:stock_strategy.data.fetcher.fetch_stock_data(MiniQMT + xtdata)
+- 股票池:--symbols(手工指定)或 --limit(自动拉取上限)
+- 时间区间:--start / --end
 
-输出（默认路径）：
+输出(默认路径):
 - data/processed/daily_panel.parquet
 - data/processed/split_manifest.json
 - data/processed/data_dictionary.md
 
-调参速查（优先顺序）：
-1) 样本规模：
-   - 快速验证：--limit 20
-   - 正式研究：--limit 100~500（视机器与时长）
-2) 时间跨度：
-   - 先 3~5 年验证，再扩到 8~10 年
-3) 复权口径：
-   - 默认 qfq；与下游训练/回测口径保持一致
-4) 稳定性：
-   - 网络不稳时提高 --retries（如 3~5）
-5) 日历补齐：
-   - 默认补齐并集交易日历（推荐）
+行业补齐(方案A,独立可删):
+- 默认启用 `--industry-scheme scheme_a_local`
+- 行业映射文件默认:`data/meta/industry_map_scheme_a.csv`
+- 未来方案B打通后,可切换 `--industry-scheme none` 并删除方案A相关文件。
+
+调参速查(优先顺序):
+1) 样本规模:
+   - 快速验证:--limit 20
+   - 正式研究:--limit 100~500(视机器与时长)
+2) 时间跨度:
+   - 先 3~5 年验证,再扩到 8~10 年
+3) 复权口径:
+   - 默认 qfq;与下游训练/回测口径保持一致
+4) 稳定性:
+   - 网络不稳时提高 --retries(如 3~5)
+5) 日历补齐:
+   - 默认补齐并集交易日历(推荐)
    - 用 --no-union-calendar 可关闭
-6) 数据切分：
+6) 数据切分:
    - 默认 train/val/test = 0.70/0.15/0.15
    - 调参时保证 train_ratio + val_ratio < 1
 """
@@ -50,6 +55,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stock_strategy.data.fetcher import fetch_stock_data, list_a_share_symbols
+from stock_strategy.data.industry_scheme_a import attach_industry_scheme_a
 
 CORE_SYMBOLS = [
     "000001", "600036", "600519", "000858", "300750",
@@ -123,7 +129,7 @@ def fetch_symbol_daily(symbol: str, start: str, end: str, adjust: str, retries: 
             d[col] = np.nan if col != "volume" else 0.0
         d[col] = pd.to_numeric(d[col], errors="coerce")
 
-    # fetch_stock_data 当前主线输出不含 amount，这里采用 close*volume 近似
+    # fetch_stock_data 当前主线输出不含 amount,这里采用 close*volume 近似
     d["amount"] = (d["close"] * d["volume"]).astype(float)
 
     out = pd.DataFrame(
@@ -180,7 +186,7 @@ def build_panel(
     if not use_union_calendar:
         return panel.sort_values(["date", "stock_code"]).reset_index(drop=True)
 
-    # 统一日历：使用样本中所有交易日并对每只股票补齐
+    # 统一日历:使用样本中所有交易日并对每只股票补齐
     all_dates = pd.DatetimeIndex(sorted(panel["date"].dropna().unique()))
     completed = []
     for s in symbols:
@@ -188,7 +194,7 @@ def build_panel(
         one["stock_code"] = s
         one["is_trading"] = one["close"].notna().astype(int)
 
-        # 停牌/缺失行处理：价格保持 NaN，成交量/成交额置 0
+        # 停牌/缺失行处理:价格保持 NaN,成交量/成交额置 0
         for c in ["volume", "amount"]:
             one[c] = pd.to_numeric(one[c], errors="coerce")
             one.loc[one["is_trading"] == 0, c] = 0.0
@@ -207,6 +213,46 @@ def build_panel(
     panel = panel.drop_duplicates(subset=["date", "stock_code"], keep="last")
     panel = panel.sort_values(["date", "stock_code"]).reset_index(drop=True)
     return panel
+
+
+def apply_industry_enrichment(
+    panel: pd.DataFrame,
+    industry_scheme: str,
+    industry_map_path: str,
+    industry_strict: bool,
+):
+    """
+    行业补齐入口(方案A独立注入)。
+
+    - none: 不做行业补齐
+    - scheme_a_local: 使用本地映射表注入 industry
+    """
+    if industry_scheme == "none":
+        stats = {
+            "industry_scheme": "none",
+            "industry_map_path": "",
+            "industry_symbol_coverage": 0.0,
+            "industry_row_coverage": float(1.0 - panel["industry"].isna().mean()) if ("industry" in panel.columns and len(panel)) else 0.0,
+            "industry_missing_symbols": [],
+        }
+        return panel, stats
+
+    if industry_scheme == "scheme_a_local":
+        enriched, s = attach_industry_scheme_a(
+            panel=panel,
+            map_path=industry_map_path,
+            strict=industry_strict,
+        )
+        stats = {
+            "industry_scheme": "scheme_a_local",
+            "industry_map_path": s.map_path,
+            "industry_symbol_coverage": round(s.mapping_coverage, 6),
+            "industry_row_coverage": round(s.row_coverage, 6),
+            "industry_missing_symbols": s.missing_symbols,
+        }
+        return enriched, stats
+
+    raise ValueError(f"不支持的 industry_scheme: {industry_scheme}")
 
 
 def make_split_manifest(panel: pd.DataFrame, train_ratio: float, val_ratio: float) -> dict:
@@ -260,36 +306,36 @@ def make_split_manifest(panel: pd.DataFrame, train_ratio: float, val_ratio: floa
 
 
 def write_data_dictionary(path: Path):
-    content = """# data_dictionary（阶段2）
+    content = """# data_dictionary(阶段2)
 
-## 表：daily_panel.parquet
+## 表:daily_panel.parquet
 
-每行代表某只股票在某个交易日的一条观测（股票代码 + 日期 唯一）。
+每行代表某只股票在某个交易日的一条观测(股票代码 + 日期 唯一)。
 
 ### 字段说明
-- `date`：交易日期（datetime）
-- `stock_code`：6位股票代码（string）
-- `open`：开盘价（float）
-- `high`：最高价（float）
-- `low`：最低价（float）
-- `close`：收盘价（float）
-- `volume`：成交量（float）
-- `amount`：成交额（float，当前由 close*volume 近似）
-- `adj_factor`：复权因子（float，当前固定 1.0）
-- `is_trading`：是否可交易（1=有交易，0=停牌/缺失补齐行）
-- `industry`：行业名称（string，可空）
+- `date`:交易日期(datetime)
+- `stock_code`:6位股票代码(string)
+- `open`:开盘价(float)
+- `high`:最高价(float)
+- `low`:最低价(float)
+- `close`:收盘价(float)
+- `volume`:成交量(float)
+- `amount`:成交额(float,当前由 close*volume 近似)
+- `adj_factor`:复权因子(float,当前固定 1.0)
+- `is_trading`:是否可交易(1=有交易,0=停牌/缺失补齐行)
+- `industry`：行业名称（string，可空；方案A可由本地映射注入）
 
 ### 数据处理规则
-1. 统一字段类型，日期转 datetime，价格量转数值。
+1. 统一字段类型,日期转 datetime,价格量转数值。
 2. 使用样本并集交易日历对每只股票补齐日期。
-3. 补齐行（停牌/缺失）规则：
+3. 补齐行(停牌/缺失)规则:
    - `is_trading=0`
    - `open/high/low/close` 保持缺失
    - `volume/amount` 置 0
-4. 去重规则：`date + stock_code` 保留最后一条。
+4. 去重规则:`date + stock_code` 保留最后一条。
 
 ### 时间切分
-见 `split_manifest.json`，按日期切分 train/val/test，避免未来信息泄漏。
+见 `split_manifest.json`,按日期切分 train/val/test,避免未来信息泄漏。
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -297,32 +343,52 @@ def write_data_dictionary(path: Path):
 
 def main():
     p = argparse.ArgumentParser(
-        description="阶段2：研究数据集构建",
+        description="阶段2:研究数据集构建",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
-            "示例：\n"
+            "示例:\n"
             "  python build_dataset.py --start 20200101 --end 20260331 --limit 20\n"
             "  python build_dataset.py --symbols 000001,600519,300750 --start 20180101 --end 20260331\n"
             "\n"
-            "调参建议：\n"
-            "  1) 先小样本验证：--limit 20\n"
-            "  2) 再扩样本规模：--limit 100~500\n"
+            "调参建议:\n"
+            "  1) 先小样本验证:--limit 20\n"
+            "  2) 再扩样本规模:--limit 100~500\n"
             "  3) train/val 需满足 train_ratio + val_ratio < 1\n"
+            "  4) 方案A行业注入:--industry-scheme scheme_a_local --industry-map-path data/meta/industry_map_scheme_a.csv\n"
         ),
     )
     p.add_argument("--start", default="20200101", help="开始日期 YYYYMMDD")
     p.add_argument("--end", default=datetime.now().strftime("%Y%m%d"), help="结束日期 YYYYMMDD")
-    p.add_argument("--symbols", default="", help="逗号分隔股票代码；为空时自动从 MiniQMT 股票池获取")
-    p.add_argument("--limit", type=int, default=60, help="自动股票池数量上限（建议：快速=20，研究=100~500）")
+    p.add_argument("--symbols", default="", help="逗号分隔股票代码;为空时自动从 MiniQMT 股票池获取")
+    p.add_argument("--limit", type=int, default=60, help="自动股票池数量上限(建议:快速=20,研究=100~500)")
     p.add_argument("--adjust", default="qfq", choices=["qfq", "hfq", "none"], help="复权口径")
-    p.add_argument("--retries", type=int, default=2, help="单标的数据拉取重试次数（网络不稳可提高到 3~5）")
+    p.add_argument("--retries", type=int, default=2, help="单标的数据拉取重试次数(网络不稳可提高到 3~5)")
     p.add_argument("--cache-dir", default="output/cache", help="拉取阶段缓存目录")
     p.add_argument("--out", default="data/processed/daily_panel.parquet", help="面板数据输出路径")
     p.add_argument("--split-out", default="data/processed/split_manifest.json", help="时间切分清单输出路径")
     p.add_argument("--dict-out", default="data/processed/data_dictionary.md", help="字段字典输出路径")
     p.add_argument("--train-ratio", type=float, default=0.7, help="训练集日期占比")
     p.add_argument("--val-ratio", type=float, default=0.15, help="验证集日期占比")
-    p.add_argument("--no-union-calendar", action="store_true", help="不做并集日历补齐（默认开启补齐）")
+    p.add_argument("--no-union-calendar", action="store_true", help="不做并集日历补齐(默认开启补齐)")
+
+    # 方案A(本地行业映射): 与主线解耦,后续可整体删除
+    p.add_argument(
+        "--industry-scheme",
+        choices=["scheme_a_local", "none"],
+        default="scheme_a_local",
+        help="行业补齐方案(默认 scheme_a_local;方案B打通后可切 none)",
+    )
+    p.add_argument(
+        "--industry-map-path",
+        default="data/meta/industry_map_scheme_a.csv",
+        help="方案A行业映射文件路径",
+    )
+    p.add_argument(
+        "--industry-strict",
+        action="store_true",
+        help="方案A严格模式:存在未映射股票时直接报错",
+    )
+
     args = p.parse_args()
 
     if not (0.0 < args.train_ratio < 1.0):
@@ -356,6 +422,14 @@ def main():
     if dup > 0:
         panel = panel.drop_duplicates(subset=["date", "stock_code"], keep="last")
 
+    # 方案A:行业补齐(独立注入层,便于未来删除)
+    panel, industry_stats = apply_industry_enrichment(
+        panel=panel,
+        industry_scheme=args.industry_scheme,
+        industry_map_path=args.industry_map_path,
+        industry_strict=args.industry_strict,
+    )
+
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     panel.to_parquet(out_path, index=False)
@@ -370,6 +444,7 @@ def main():
     split["end"] = args.end
     split["adjust"] = args.adjust
     split["union_calendar"] = not args.no_union_calendar
+    split["industry"] = industry_stats
 
     split_path = Path(args.split_out)
     split_path.parent.mkdir(parents=True, exist_ok=True)
@@ -384,6 +459,12 @@ def main():
     print(f"  rows  : {len(panel)}")
     print(f"  stocks: {panel['stock_code'].nunique()}")
     print(f"  days  : {panel['date'].nunique()}")
+    print(f"  industry_scheme        : {industry_stats.get('industry_scheme')}")
+    print(f"  industry_symbol_cover  : {industry_stats.get('industry_symbol_coverage')}")
+    print(f"  industry_row_cover     : {industry_stats.get('industry_row_coverage')}")
+    if industry_stats.get("industry_missing_symbols"):
+        miss = industry_stats.get("industry_missing_symbols", [])
+        print(f"  industry_missing_symbols(sample): {miss[:10]}")
 
 
 if __name__ == "__main__":

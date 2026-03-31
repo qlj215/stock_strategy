@@ -20,6 +20,10 @@
 - 切分：`data/processed/split_manifest.json`
 - 字典：`data/processed/data_dictionary.md`
 - 说明报告：`report/阶段2_build_dataset模块调参与输入输出说明.md`
+- 方案A独立补丁：
+  - `data/industry_scheme_a.py`
+  - `data/meta/industry_map_scheme_a.csv`
+  - `report/阶段2_方案A本地行业映射独立补丁说明.md`
 
 ### 本次实跑结果（2026-03-31）
 
@@ -28,6 +32,7 @@
 - 股票数：`20`
 - 交易日数：`1511`
 - 训练/验证/测试：`1057 / 226 / 228` 日
+- 行业覆盖（方案A）：symbol=1.0，row=1.0
 
 ## 阶段3交付
 
@@ -46,6 +51,8 @@
 - 交易日数：`1431`
 - 特征数：`31`
 - 标签周期：`5, 10` 日
+- 行业有效率：`industry_nonnull_ratio=1.0`
+- 行业相对收益非退化：`rel_ind_eq_rel_mkt_ratio={'1d': 0.0, '5d': 0.0}`
 
 ## 说明
 

@@ -25,6 +25,9 @@
 关键输入字段（必须存在）：
 - `date, stock_code, open, high, low, close, volume, amount`
 
+行业相关特征依赖：
+- `industry` 字段建议尽量完整（推荐先通过阶段2方案A补齐）
+
 ---
 
 ## 2.2 输出（默认）
@@ -33,6 +36,7 @@
   - 含基础字段 + 特征字段 + 标签字段
 - `data/features/feature_manifest.json`  
   - 记录参数、列名、样本规模、缺失率等元信息
+  - 包含行业质量指标：`industry_nonnull_ratio`、`rel_ind_eq_rel_mkt_ratio`
 - `data/features/label_spec.md`  
   - 标签定义文档（horizon、分位阈值、归一化模式）
 
@@ -148,6 +152,7 @@ python feature_engineering.py --normalize none
 
 建议：
 - 阶段4先开启（便于快速出 baseline）
+- 若开启后样本骤降，优先检查阶段2行业覆盖和 `feature_manifest.json` 的行业指标
 
 示例：
 ```bash

@@ -36,6 +36,9 @@
 | `--train-ratio` | 训练集比例 | `0.7` | 常用 0.6~0.75 |
 | `--val-ratio` | 验证集比例 | `0.15` | 常用 0.1~0.2 |
 | `--no-union-calendar` | 关闭并集日历补齐 | 关闭（即默认补齐） | 一般不建议关闭 |
+| `--industry-scheme` | 行业补齐方案 | `scheme_a_local` | 方案A可用，方案B打通后切 `none` |
+| `--industry-map-path` | 方案A本地行业映射CSV | `data/meta/industry_map_scheme_a.csv` | 映射维护入口 |
+| `--industry-strict` | 映射不全时是否报错 | 关闭 | 数据质量闸门，训练前建议开启一次 |
 
 > 校验规则：`train_ratio + val_ratio < 1`，否则脚本会报错退出。
 
@@ -57,6 +60,11 @@
 
 - 路径：`data/processed/split_manifest.json`
 - 内容：按日期切分的 train/val/test 边界、行数、天数、参数快照
+- 新增行业覆盖信息：
+  - `industry.industry_scheme`
+  - `industry.industry_symbol_coverage`
+  - `industry.industry_row_coverage`
+  - `industry.industry_missing_symbols`
 
 ### 3.3 `data_dictionary.md`
 
@@ -95,6 +103,19 @@ python build_dataset.py \
 
 - 目标：保证不同机器上股票池一致
 
+### 场景 D：方案A行业补齐（当前推荐）
+
+```bash
+python build_dataset.py \
+  --start 20200101 --end 20260331 --limit 20 \
+  --industry-scheme scheme_a_local \
+  --industry-map-path data/meta/industry_map_scheme_a.csv \
+  --industry-strict
+```
+
+- 目标：在方案B不可用时，让 `industry` 字段可用。
+- 关注：`split_manifest.json` 中行业覆盖率是否接近 1。
+
 ---
 
 ## 5. 当前实现细节与注意事项
@@ -110,6 +131,10 @@ python build_dataset.py \
 
 4. 时间切分按日期而非随机  
    - 避免未来信息泄漏，符合后续时序训练要求。
+
+5. 行业补齐方案A是独立可删层  
+   - 只依赖 `data/industry_scheme_a.py` 与 `data/meta/industry_map_scheme_a.csv`。
+   - 方案B打通后可切 `--industry-scheme none` 并删除方案A文件。
 
 ---
 

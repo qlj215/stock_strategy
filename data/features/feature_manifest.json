@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-03-31T18:59:40.686921",
+  "generated_at": "2026-03-31T21:45:02.512063",
   "input_path": "data\\processed\\daily_panel.parquet",
   "output_path": "data\\features\\features_v1.parquet",
   "rows": 22590,
@@ -92,5 +92,10 @@
     "rel_mkt_ret_20": 0.0,
     "rel_ind_ret_1": 0.0,
     "rel_ind_ret_5": 0.0
+  },
+  "industry_nonnull_ratio": 1.0,
+  "rel_ind_eq_rel_mkt_ratio": {
+    "1d": 0.0,
+    "5d": 0.0
   }
 }

@@ -21,7 +21,7 @@
     "rows": 4560,
     "days": 228
   },
-  "generated_at": "2026-03-31T17:28:35.939216",
+  "generated_at": "2026-03-31T21:44:48.449241",
   "rows": 30220,
   "stocks": 20,
   "days": 1511,
@@ -50,5 +50,12 @@
   "start": "20200101",
   "end": "20260331",
   "adjust": "qfq",
-  "union_calendar": true
+  "union_calendar": true,
+  "industry": {
+    "industry_scheme": "scheme_a_local",
+    "industry_map_path": "data/meta/industry_map_scheme_a.csv",
+    "industry_symbol_coverage": 1.0,
+    "industry_row_coverage": 1.0,
+    "industry_missing_symbols": []
+  }
 }
