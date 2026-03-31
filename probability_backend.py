@@ -6,9 +6,10 @@
 - dl：调用用户配置的深度学习推理入口
 - auto：优先 dl，失败自动回退 rule
 
-环境变量：
-- STOCK_PROB_BACKEND=rule|dl|auto
-- STOCK_DL_ENTRYPOINT=python.module:function
+配置优先级：
+1) 请求参数 backend
+2) 环境变量 STOCK_PROB_BACKEND / STOCK_DL_ENTRYPOINT
+3) 配置文件 config/model_backend.json
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -122,10 +123,14 @@ class RuleProbabilityBackend:
             },
         }
 
+    def predict_batch(self, daily_dfs: Sequence[pd.DataFrame]) -> List[Dict[str, Any]]:
+        return [self.predict(df) for df in daily_dfs]
+
 
 @dataclass
 class DLEntry:
     fn: Optional[Callable[[pd.DataFrame], Dict[str, Any]]] = None
+    batch_fn: Optional[Callable[[List[pd.DataFrame]], List[Dict[str, Any]]]] = None
     entrypoint: str = ""
     error: str = ""
 
@@ -133,20 +138,25 @@ class DLEntry:
 def _load_dl_entry(entrypoint: str) -> DLEntry:
     ep = (entrypoint or "").strip()
     if not ep:
-        return DLEntry(fn=None, entrypoint="", error="未配置 STOCK_DL_ENTRYPOINT")
+        return DLEntry(fn=None, batch_fn=None, entrypoint="", error="未配置 STOCK_DL_ENTRYPOINT")
 
     if ":" not in ep:
-        return DLEntry(fn=None, entrypoint=ep, error="入口格式应为 module:function")
+        return DLEntry(fn=None, batch_fn=None, entrypoint=ep, error="入口格式应为 module:function")
 
     mod_name, fn_name = ep.split(":", 1)
     try:
         mod = importlib.import_module(mod_name)
         fn = getattr(mod, fn_name)
         if not callable(fn):
-            return DLEntry(fn=None, entrypoint=ep, error=f"{ep} 不是可调用函数")
-        return DLEntry(fn=fn, entrypoint=ep, error="")
+            return DLEntry(fn=None, batch_fn=None, entrypoint=ep, error=f"{ep} 不是可调用函数")
+
+        batch_fn = getattr(mod, "predict_proba_batch", None)
+        if batch_fn is not None and not callable(batch_fn):
+            batch_fn = None
+
+        return DLEntry(fn=fn, batch_fn=batch_fn, entrypoint=ep, error="")
     except Exception as e:
-        return DLEntry(fn=None, entrypoint=ep, error=str(e))
+        return DLEntry(fn=None, batch_fn=None, entrypoint=ep, error=str(e))
 
 
 def _normalize_dl_output(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -188,6 +198,20 @@ class DLProbabilityBackend:
         raw = self._entry.fn(daily_df.copy())
         return _normalize_dl_output(raw)
 
+    def predict_batch(self, daily_dfs: Sequence[pd.DataFrame]) -> List[Dict[str, Any]]:
+        if not self.available:
+            raise RuntimeError(self.error or "DL 入口不可用")
+
+        if self._entry.batch_fn is not None:
+            raw_list = self._entry.batch_fn([df.copy() for df in daily_dfs])
+            if not isinstance(raw_list, list):
+                raise TypeError("DL batch 输出必须是 list")
+            if len(raw_list) != len(daily_dfs):
+                raise ValueError(f"DL batch 输出长度不匹配: expect={len(daily_dfs)} got={len(raw_list)}")
+            return [_normalize_dl_output(item) for item in raw_list]
+
+        return [self.predict(df) for df in daily_dfs]
+
 
 def _resolve_requested_backend(requested: Optional[str]) -> str:
     cfg = _load_backend_config()
@@ -215,38 +239,66 @@ def _choose_backend(mode: str) -> Tuple[str, Any, DLProbabilityBackend]:
     return mode, rule, dl
 
 
+def _attach_meta(out: Dict[str, Any], backend: str, requested: str, fallback: bool, error: str = "") -> Dict[str, Any]:
+    out = dict(out)
+    out.update(
+        {
+            "backend": backend,
+            "backend_requested": requested,
+            "backend_fallback": bool(fallback),
+            "backend_error": error or "",
+        }
+    )
+    return out
+
+
 def predict_probability(
     daily_df: pd.DataFrame,
     backend: Optional[str] = None,
     allow_fallback: bool = True,
 ) -> Dict[str, Any]:
     mode = _resolve_requested_backend(backend)
-    requested_mode, chosen_backend, dl_backend = _choose_backend(mode)
+    requested_mode, chosen_backend, _dl_backend = _choose_backend(mode)
 
     try:
         out = chosen_backend.predict(daily_df)
-        out.update(
-            {
-                "backend": chosen_backend.name,
-                "backend_requested": requested_mode,
-                "backend_fallback": False,
-                "backend_error": "",
-            }
-        )
-        return out
+        return _attach_meta(out, backend=chosen_backend.name, requested=requested_mode, fallback=False)
     except Exception as e:
         if allow_fallback and chosen_backend.name != "rule":
             rule = RuleProbabilityBackend()
             out = rule.predict(daily_df)
             out["reasons"] = [f"DL 后端不可用，已回退 rule：{e}"] + list(out.get("reasons", []))
-            out.update(
-                {
-                    "backend": "rule",
-                    "backend_requested": requested_mode,
-                    "backend_fallback": True,
-                    "backend_error": str(e),
-                }
-            )
+            return _attach_meta(out, backend="rule", requested=requested_mode, fallback=True, error=str(e))
+        raise
+
+
+def predict_probability_batch(
+    daily_dfs: Sequence[pd.DataFrame],
+    backend: Optional[str] = None,
+    allow_fallback: bool = True,
+) -> List[Dict[str, Any]]:
+    mode = _resolve_requested_backend(backend)
+    requested_mode, chosen_backend, _dl_backend = _choose_backend(mode)
+
+    daily_dfs = list(daily_dfs)
+    if not daily_dfs:
+        return []
+
+    try:
+        raw_list = chosen_backend.predict_batch(daily_dfs)
+        return [
+            _attach_meta(item, backend=chosen_backend.name, requested=requested_mode, fallback=False)
+            for item in raw_list
+        ]
+    except Exception as e:
+        if allow_fallback and chosen_backend.name != "rule":
+            rule = RuleProbabilityBackend()
+            raw_list = rule.predict_batch(daily_dfs)
+            out = []
+            for item in raw_list:
+                item = dict(item)
+                item["reasons"] = [f"DL 后端不可用，已回退 rule：{e}"] + list(item.get("reasons", []))
+                out.append(_attach_meta(item, backend="rule", requested=requested_mode, fallback=True, error=str(e)))
             return out
         raise
 

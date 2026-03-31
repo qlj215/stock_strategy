@@ -24,6 +24,7 @@ from stock_strategy.data.fetcher import (
 )
 from stock_strategy.probability_backend import (
     predict_probability,
+    predict_probability_batch,
     get_backend_runtime_status,
 )
 
@@ -882,11 +883,12 @@ def market_backtest():
 
         daily = daily.set_index("date")
 
-        rows = []
-        for i in range(min_history, len(daily) - long_horizon):
-            hist = daily.iloc[: i + 1].reset_index()
-            pred = _probability_model(hist, backend=backend)
+        eval_indices = list(range(min_history, len(daily) - long_horizon))
+        histories = [daily.iloc[: i + 1].reset_index() for i in eval_indices]
+        preds = predict_probability_batch(histories, backend=backend, allow_fallback=True)
 
+        rows = []
+        for i, pred in zip(eval_indices, preds):
             close_t = float(daily["close"].iloc[i])
             ret1 = float(daily["close"].iloc[i + 1] / close_t - 1)
             ret5 = float(daily["close"].iloc[i + 5] / close_t - 1)

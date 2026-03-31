@@ -29,11 +29,16 @@
 - `RuleProbabilityBackend`：内置规则模型
 - `DLProbabilityBackend`：加载外部 DL 推理入口（`module:function`）
 
-### 新增模板
+### DL 真实入口（已替换模板）
 
 - `stock_strategy/dl_entry_template.py`
 
-提供标准函数签名 `predict_proba(daily_df)`，可直接替换成真实模型推理。
+当前已实现：
+- 读取/保存模型文件（默认 `stock_strategy/models/simple_prob_mlp.pt`）
+- 特征预处理（OHLCV -> 多因子窗口特征）
+- `predict_proba_batch` 批量推理
+- `predict_proba` 单样本推理
+- 模型文件缺失时自动训练轻量 PyTorch bootstrap 模型并落盘
 
 ### trainer_app 侧改造
 
