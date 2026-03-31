@@ -22,6 +22,10 @@ from stock_strategy.data.fetcher import (
     list_dynamic_industry_sectors,
     list_symbols_in_dynamic_sector,
 )
+from stock_strategy.probability_backend import (
+    predict_probability,
+    get_backend_runtime_status,
+)
 
 app = Flask(__name__, static_folder="web", static_url_path="")
 
@@ -461,56 +465,9 @@ def _norm_intraday_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _probability_model(daily_df: pd.DataFrame) -> Dict:
-    if len(daily_df) < 30:
-        return {
-            "p_up_today": 0.50,
-            "p_up_5d": 0.50,
-            "p_up_long": 0.50,
-            "reasons": ["历史样本较少，采用中性先验概率。"],
-        }
-
-    d = daily_df.copy()
-    d["ret1"] = d["close"].pct_change()
-    d["ma5"] = d["close"].rolling(5).mean()
-    d["ma20"] = d["close"].rolling(20).mean()
-    d["vol5"] = d["volume"].rolling(5).mean()
-    d["vol20"] = d["volume"].rolling(20).mean()
-
-    last = d.iloc[-1]
-    momentum = (last["close"] / d["close"].iloc[-6]) - 1 if len(d) >= 6 else 0
-    ma_bias = ((last["ma5"] - last["ma20"]) / last["ma20"]) if pd.notna(last["ma5"]) and pd.notna(last["ma20"]) and last["ma20"] else 0
-    vol_ratio = (last["vol5"] / last["vol20"]) if pd.notna(last["vol5"]) and pd.notna(last["vol20"]) and last["vol20"] else 1
-    recent_win = (d["ret1"].tail(10) > 0).mean()
-
-    score_today = 0.35 * momentum + 0.45 * ma_bias + 0.15 * (vol_ratio - 1) + 0.25 * (recent_win - 0.5)
-    score_5d = 0.45 * momentum + 0.55 * ma_bias + 0.20 * (vol_ratio - 1) + 0.35 * (recent_win - 0.5)
-    score_long = 0.25 * momentum + 0.70 * ma_bias + 0.10 * (vol_ratio - 1) + 0.20 * (recent_win - 0.5)
-
-    sigmoid = lambda x: 1 / (1 + pow(2.718281828, -5 * x))
-
-    p_today = float(max(0.05, min(0.95, sigmoid(score_today))))
-    p_5d = float(max(0.05, min(0.95, sigmoid(score_5d))))
-    p_long = float(max(0.05, min(0.95, sigmoid(score_long))))
-
-    reasons = []
-    reasons.append(f"短期动量（近5日）为 {momentum * 100:.2f}%")
-    reasons.append(f"均线结构（MA5-MA20）偏离 {ma_bias * 100:.2f}%")
-    reasons.append(f"量能比（VOL5/VOL20）为 {vol_ratio:.2f}")
-    reasons.append(f"近10日上涨胜率 {recent_win * 100:.1f}%")
-
-    return {
-        "p_up_today": p_today,
-        "p_up_5d": p_5d,
-        "p_up_long": p_long,
-        "reasons": reasons,
-        "features": {
-            "momentum_5d": round(momentum * 100, 2),
-            "ma_bias_pct": round(ma_bias * 100, 2),
-            "vol_ratio": round(vol_ratio, 2),
-            "win_rate_10d": round(recent_win * 100, 1),
-        },
-    }
+def _probability_model(daily_df: pd.DataFrame, backend: str | None = None) -> Dict:
+    """统一概率预测入口：支持 rule / dl / auto 后端切换。"""
+    return predict_probability(daily_df, backend=backend, allow_fallback=True)
 
 
 def _build_market_codex_prompt(symbol: str, daily_df: pd.DataFrame, intraday_df: pd.DataFrame, model_result: Dict) -> str:
@@ -574,11 +531,18 @@ def market_page():
     return send_from_directory("web", "market.html")
 
 
+@app.route("/api/market/model_backend_status")
+def market_model_backend_status():
+    backend = (request.args.get("backend") or "").strip() or None
+    return jsonify(get_backend_runtime_status(backend))
+
+
 @app.route("/api/market/overview")
 def market_overview():
     symbol = (request.args.get("symbol") or "000001").strip()
     days = int(request.args.get("days", "60"))
     days = max(20, min(days, 250))
+    backend = (request.args.get("backend") or "").strip() or None
 
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
@@ -590,7 +554,7 @@ def market_overview():
 
         intraday = _intraday_from_fetcher(symbol, count=240)
 
-        model_result = _probability_model(daily)
+        model_result = _probability_model(daily, backend=backend)
         latest = daily.iloc[-1]
 
         return jsonify({
@@ -629,6 +593,10 @@ def market_overview():
                 "long_up": round(model_result["p_up_long"], 4),
                 "reasons": model_result["reasons"],
                 "features": model_result.get("features", {}),
+                "backend": model_result.get("backend", "rule"),
+                "backend_requested": model_result.get("backend_requested", backend or "rule"),
+                "backend_fallback": bool(model_result.get("backend_fallback", False)),
+                "backend_error": model_result.get("backend_error", ""),
             },
         })
     except Exception as e:
@@ -641,6 +609,7 @@ def market_codex_reason():
     symbol = (data.get("symbol") or "000001").strip()
     days = int(data.get("days", 60))
     days = max(20, min(days, 250))
+    backend = (data.get("backend") or "").strip() or None
 
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
@@ -650,13 +619,19 @@ def market_codex_reason():
         return jsonify({"error": "未获取到日线数据"}), 400
 
     intraday = _intraday_from_fetcher(symbol, count=240)
-    model_result = _probability_model(daily)
+    model_result = _probability_model(daily, backend=backend)
 
     analysis, err = _run_market_codex_reason(symbol, daily, intraday, model_result)
     if err:
         return jsonify({"error": err}), 500
 
-    return jsonify({"symbol": symbol, "analysis": analysis})
+    return jsonify({
+        "symbol": symbol,
+        "analysis": analysis,
+        "backend": model_result.get("backend", "rule"),
+        "backend_requested": model_result.get("backend_requested", backend or "rule"),
+        "backend_fallback": bool(model_result.get("backend_fallback", False)),
+    })
 
 
 def _to_float(v, default=0.0):
@@ -666,14 +641,14 @@ def _to_float(v, default=0.0):
         return default
 
 
-def _calc_symbol_snapshot(symbol: str, days: int = 60) -> Dict:
+def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = None) -> Dict:
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
     daily = _daily_from_fetcher(symbol, start, end).tail(days)
     if daily.empty:
         return {}
 
-    pred = _probability_model(daily)
+    pred = _probability_model(daily, backend=backend)
     latest = daily.iloc[-1]
 
     return {
@@ -685,6 +660,8 @@ def _calc_symbol_snapshot(symbol: str, days: int = 60) -> Dict:
         "today_up": round(pred["p_up_today"], 4),
         "next_5d_up": round(pred["p_up_5d"], 4),
         "long_up": round(pred["p_up_long"], 4),
+        "model_backend": pred.get("backend", "rule"),
+        "model_backend_fallback": bool(pred.get("backend_fallback", False)),
     }
 
 
@@ -717,6 +694,7 @@ def market_scan():
     sort_by = (request.args.get("sort_by") or "next_5d_up").strip()
     days = max(20, min(int(request.args.get("days", "60")), 250))
     limit = max(1, min(int(request.args.get("limit", "30")), 400))
+    backend = (request.args.get("backend") or "").strip() or None
 
     allowed_sort = {"today_up", "next_5d_up", "long_up", "pct", "turnover"}
     if sort_by not in allowed_sort:
@@ -780,7 +758,7 @@ def market_scan():
         failed = []
         for s in symbols:
             try:
-                item = _calc_symbol_snapshot(s, days=days)
+                item = _calc_symbol_snapshot(s, days=days, backend=backend)
                 if not item:
                     failed.append(s)
                     continue
@@ -808,6 +786,7 @@ def market_scan():
             "mode": mode,
             "industry": industry if mode == "industry" else "全A股",
             "sector_source": sector_source,
+            "model_backend": get_backend_runtime_status(backend),
             "days": days,
             "sort_by": sort_by,
             "requested": len(symbols),
@@ -951,6 +930,7 @@ def market_backtest():
     end = (request.args.get("end") or datetime.now().strftime("%Y%m%d")).strip()
     threshold = float(request.args.get("threshold", "0.5"))
     threshold = max(0.05, min(threshold, 0.95))
+    backend = (request.args.get("backend") or "").strip() or None
 
     min_history = max(30, min(int(request.args.get("min_history", "120")), 400))
     long_horizon = max(20, min(int(request.args.get("long_horizon", "60")), 120))
@@ -965,7 +945,7 @@ def market_backtest():
         rows = []
         for i in range(min_history, len(daily) - long_horizon):
             hist = daily.iloc[: i + 1].reset_index()
-            pred = _probability_model(hist)
+            pred = _probability_model(hist, backend=backend)
 
             close_t = float(daily["close"].iloc[i])
             ret1 = float(daily["close"].iloc[i + 1] / close_t - 1)
@@ -1000,6 +980,7 @@ def market_backtest():
 
         return jsonify({
             "symbol": symbol,
+            "model_backend": get_backend_runtime_status(backend),
             "window": {"start": start, "end": end, "samples": int(len(bt)), "min_history": min_history, "long_horizon": long_horizon},
             "classification": {"d1": m1, "d5": m5, "long": ml},
             "strategy": {"d1": s1, "d5": s5, "long": sl},
