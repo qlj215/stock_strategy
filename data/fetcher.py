@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -301,6 +301,140 @@ def get_symbol_name(symbol: str) -> str:
         return str(info.get("InstrumentName") or info.get("ExtendName") or "").strip()
     except Exception:
         return ""
+
+
+def _pick_col_like(df: pd.DataFrame, candidates: List[str]) -> str:
+    if df is None or df.empty:
+        return ""
+
+    cols = [str(c) for c in df.columns]
+    lower_map = {str(c).lower(): str(c) for c in cols}
+
+    for c in candidates:
+        if c in cols:
+            return c
+        lc = c.lower()
+        if lc in lower_map:
+            return lower_map[lc]
+
+    for c in cols:
+        lc = c.lower()
+        if any(k in lc for k in ["name", "sector", "block", "板块", "名称"]):
+            return c
+    return ""
+
+
+def _is_industry_like_name(name: str) -> bool:
+    s = (name or "").strip()
+    if len(s) < 2:
+        return False
+
+    skip_tokens = [
+        "A股", "B股", "ETF", "债券", "基金", "指数", "期权", "期货", "转债",
+        "交易所", "市场", "沪深", "上证", "深证", "京市", "连续合约", "能源中心",
+        "港股", "中金所", "上期所", "大商所", "郑商所", "科创板CDR",
+    ]
+    return not any(t in s for t in skip_tokens)
+
+
+def get_sector_sync_status() -> Dict[str, Any]:
+    """
+    检测 MiniQMT 终端侧行业板块数据可用性。
+
+    说明：
+    - base_sector_count 来自 get_sector_list（通常可用）
+    - dynamic_sector_available 依赖 get_sector_info（需要 SectorData）
+    """
+    xtdata = _load_xtdata()
+
+    status: Dict[str, Any] = {
+        "base_sector_count": 0,
+        "dynamic_sector_available": False,
+        "dynamic_sector_rows": 0,
+        "dynamic_industry_count": 0,
+        "error": "",
+    }
+
+    try:
+        base = xtdata.get_sector_list() or []
+        status["base_sector_count"] = len(base)
+    except Exception as e:
+        status["error"] = f"get_sector_list 失败: {e}"
+        return status
+
+    try:
+        info = xtdata.get_sector_info("")
+        if isinstance(info, pd.DataFrame) and not info.empty:
+            status["dynamic_sector_available"] = True
+            status["dynamic_sector_rows"] = int(len(info))
+
+            name_col = _pick_col_like(
+                info,
+                ["板块名称", "行业名称", "name", "Name", "SectorName", "BlockName"],
+            )
+            if name_col:
+                names = [str(x).strip() for x in info[name_col].dropna().tolist()]
+                industry_names = sorted({n for n in names if _is_industry_like_name(n)})
+                status["dynamic_industry_count"] = len(industry_names)
+        else:
+            status["error"] = "get_sector_info 返回空"
+    except Exception as e:
+        status["error"] = str(e)
+
+    return status
+
+
+def list_dynamic_industry_sectors(limit: Optional[int] = None) -> List[str]:
+    """
+    从 MiniQMT 终端板块库读取行业列表。
+    若板块库未就绪（如 SectorData 缺失），返回空列表。
+    """
+    xtdata = _load_xtdata()
+    try:
+        info = xtdata.get_sector_info("")
+    except Exception:
+        return []
+
+    if not isinstance(info, pd.DataFrame) or info.empty:
+        return []
+
+    name_col = _pick_col_like(
+        info,
+        ["板块名称", "行业名称", "name", "Name", "SectorName", "BlockName"],
+    )
+    if not name_col:
+        return []
+
+    names = [str(x).strip() for x in info[name_col].dropna().tolist()]
+    out = sorted({n for n in names if _is_industry_like_name(n)})
+    if limit is not None:
+        out = out[: max(0, int(limit))]
+    return out
+
+
+def list_symbols_in_dynamic_sector(sector_name: str, limit: Optional[int] = None) -> List[str]:
+    """按 MiniQMT 动态板块名获取成分股（返回 6 位代码）。"""
+    xtdata = _load_xtdata()
+    try:
+        raw = xtdata.get_stock_list_in_sector(str(sector_name).strip()) or []
+    except Exception:
+        return []
+
+    seen = set()
+    out = []
+    for c in raw:
+        p = _to_plain_symbol(c)
+        if not p or p in seen:
+            continue
+        # 只保留A/BJ常见6位证券代码
+        if not (p.isdigit() and len(p) == 6):
+            continue
+        seen.add(p)
+        out.append(p)
+
+    if limit is not None:
+        out = out[: max(0, int(limit))]
+    return out
 
 
 def save_data(df: pd.DataFrame, symbol: str, data_dir: str = "output") -> str:

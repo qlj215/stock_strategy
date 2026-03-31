@@ -18,19 +18,30 @@ from stock_strategy.data.fetcher import (
     list_a_share_symbols,
     get_realtime_snapshots,
     get_symbol_name,
+    get_sector_sync_status,
+    list_dynamic_industry_sectors,
+    list_symbols_in_dynamic_sector,
 )
 
 app = Flask(__name__, static_folder="web", static_url_path="")
 
 SYMBOL_POOL = ["000858", "600519", "000001", "600036", "300750", "002594", "600276", "603986"]
-# 行业扫描在 MiniQMT 场景下使用本地行业池（可按需扩展）
-SECTOR_SYMBOLS = {
+# 行业扫描兜底本地池（当 MiniQMT 动态板块不可用时回退）
+LOCAL_SECTOR_SYMBOLS = {
     "银行": ["000001", "600036"],
     "白酒": ["600519", "000858"],
     "新能源": ["002594", "300750"],
     "半导体": ["603986", "688981"],
     "医药": ["600276", "300760"],
 }
+# 动态板块列表缓存，避免频繁触发终端侧 I/O
+SECTOR_CACHE = {
+    "ts": 0.0,
+    "source": "local_fallback",
+    "sectors": sorted(LOCAL_SECTOR_SYMBOLS.keys()),
+    "status": {},
+}
+SECTOR_CACHE_TTL_SEC = 300
 CHALLENGES = {}
 REVIEWS = {}
 REPLAY_JOBS = {}
@@ -38,6 +49,44 @@ REPLAY_JOBS = {}
 
 def _today_str():
     return datetime.now().strftime("%Y%m%d")
+
+
+def _get_sector_registry(force_refresh: bool = False) -> Dict:
+    """
+    获取行业列表注册表：优先 MiniQMT 动态板块，失败时回退本地池。
+    """
+    now_ts = datetime.now().timestamp()
+    if (not force_refresh) and SECTOR_CACHE.get("sectors") and (now_ts - float(SECTOR_CACHE.get("ts", 0))) < SECTOR_CACHE_TTL_SEC:
+        return {
+            "source": SECTOR_CACHE.get("source", "local_fallback"),
+            "sectors": list(SECTOR_CACHE.get("sectors", [])),
+            "status": dict(SECTOR_CACHE.get("status", {})),
+        }
+
+    status = get_sector_sync_status()
+    sectors = []
+    source = "local_fallback"
+
+    if status.get("dynamic_sector_available"):
+        sectors = list_dynamic_industry_sectors(limit=1000)
+        if sectors:
+            source = "miniqmt_dynamic"
+
+    if not sectors:
+        sectors = sorted(LOCAL_SECTOR_SYMBOLS.keys())
+
+    SECTOR_CACHE.update({
+        "ts": now_ts,
+        "source": source,
+        "sectors": sectors,
+        "status": status,
+    })
+
+    return {
+        "source": source,
+        "sectors": list(sectors),
+        "status": status,
+    }
 
 
 def _trend_label(df: pd.DataFrame, i: int) -> str:
@@ -639,11 +688,26 @@ def _calc_symbol_snapshot(symbol: str, days: int = 60) -> Dict:
     }
 
 
+@app.route("/api/market/sector_sync_status")
+def market_sector_sync_status():
+    force = request.args.get("force", "0") == "1"
+    reg = _get_sector_registry(force_refresh=force)
+    return jsonify({
+        "source": reg["source"],
+        "sector_count": len(reg["sectors"]),
+        "status": reg["status"],
+    })
+
+
 @app.route("/api/market/sectors")
 def market_sectors():
-    # MiniQMT 版行业列表：使用本地配置池，避免公网接口波动
-    names = sorted(SECTOR_SYMBOLS.keys())
-    return jsonify({"sectors": names})
+    force = request.args.get("force", "0") == "1"
+    reg = _get_sector_registry(force_refresh=force)
+    return jsonify({
+        "sectors": reg["sectors"],
+        "source": reg["source"],
+        "sync_status": reg["status"],
+    })
 
 
 @app.route("/api/market/scan")
@@ -663,15 +727,37 @@ def market_scan():
         names_map = {}
         snapshots = {}
 
+        sector_source = "all_mode"
+
         if mode == "industry":
             if not industry:
                 return jsonify({"error": "industry 模式需要 industry 参数"}), 400
-            if industry not in SECTOR_SYMBOLS:
-                return jsonify({"error": f"不支持的行业：{industry}（可选：{', '.join(sorted(SECTOR_SYMBOLS.keys()))}）"}), 400
-            symbols = [str(x).zfill(6) for x in SECTOR_SYMBOLS[industry]][:limit]
+
+            reg = _get_sector_registry(force_refresh=False)
+            available_sectors = set(reg.get("sectors", []))
+
+            if reg.get("source") == "miniqmt_dynamic" and industry in available_sectors:
+                symbols = list_symbols_in_dynamic_sector(industry, limit=limit)
+                sector_source = "miniqmt_dynamic"
+            else:
+                symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS.get(industry, [])][:limit]
+                sector_source = "local_fallback"
+
+            if not symbols:
+                # 动态源拿不到时，再兜底一次本地池
+                if industry in LOCAL_SECTOR_SYMBOLS:
+                    symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS[industry]][:limit]
+                    sector_source = "local_fallback"
+                else:
+                    return jsonify({
+                        "error": f"不支持的行业：{industry}",
+                        "available": sorted(list(available_sectors)) if available_sectors else sorted(LOCAL_SECTOR_SYMBOLS.keys()),
+                    }), 400
+
             names_map = {s: get_symbol_name(s) for s in symbols}
 
         elif mode == "all":
+            sector_source = "miniqmt_realtime"
             all_symbols = list_a_share_symbols()
             if not all_symbols:
                 return jsonify({"error": "无法获取全A股列表，请确认 MiniQMT 已连接且行情可用。"}), 500
@@ -721,6 +807,7 @@ def market_scan():
         return jsonify({
             "mode": mode,
             "industry": industry if mode == "industry" else "全A股",
+            "sector_source": sector_source,
             "days": days,
             "sort_by": sort_by,
             "requested": len(symbols),
