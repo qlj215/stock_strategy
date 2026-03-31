@@ -405,66 +405,6 @@ def replay_codex_status(job_id):
     return jsonify(REPLAY_JOBS[job_id])
 
 
-def _pick_col(df: pd.DataFrame, names) -> str:
-    for n in names:
-        if n in df.columns:
-            return n
-    return ""
-
-
-def _norm_daily_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "turnover", "pct"])
-
-    df = df.copy()
-    date_col = _pick_col(df, ["日期", "date", "时间"])
-    open_col = _pick_col(df, ["开盘", "open"])
-    high_col = _pick_col(df, ["最高", "high"])
-    low_col = _pick_col(df, ["最低", "low"])
-    close_col = _pick_col(df, ["收盘", "close", "最新价"])
-    volume_col = _pick_col(df, ["成交量", "volume"])
-    turnover_col = _pick_col(df, ["成交额", "amount", "turnover"])
-    pct_col = _pick_col(df, ["涨跌幅", "pct_chg", "change_percent"])
-
-    out = pd.DataFrame({
-        "date": pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT,
-        "open": pd.to_numeric(df[open_col], errors="coerce") if open_col else None,
-        "high": pd.to_numeric(df[high_col], errors="coerce") if high_col else None,
-        "low": pd.to_numeric(df[low_col], errors="coerce") if low_col else None,
-        "close": pd.to_numeric(df[close_col], errors="coerce") if close_col else None,
-        "volume": pd.to_numeric(df[volume_col], errors="coerce") if volume_col else 0.0,
-        "turnover": pd.to_numeric(df[turnover_col], errors="coerce") if turnover_col else 0.0,
-        "pct": pd.to_numeric(df[pct_col], errors="coerce") if pct_col else None,
-    }).dropna(subset=["date", "close"])
-
-    if out["pct"].isna().all():
-        out["pct"] = out["close"].pct_change() * 100
-
-    return out.sort_values("date").reset_index(drop=True)
-
-
-def _norm_intraday_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["dt", "price", "volume", "avg"])
-
-    df = df.copy()
-    dt_col = _pick_col(df, ["时间", "date", "datetime"])
-    price_col = _pick_col(df, ["收盘", "close", "最新价", "价格"])
-    volume_col = _pick_col(df, ["成交量", "volume"])
-
-    out = pd.DataFrame({
-        "dt": pd.to_datetime(df[dt_col], errors="coerce") if dt_col else pd.NaT,
-        "price": pd.to_numeric(df[price_col], errors="coerce") if price_col else None,
-        "volume": pd.to_numeric(df[volume_col], errors="coerce") if volume_col else 0.0,
-    }).dropna(subset=["dt", "price"])
-
-    out = out.sort_values("dt").reset_index(drop=True)
-    pv = (out["price"] * out["volume"]).cumsum()
-    vv = out["volume"].cumsum().replace(0, pd.NA)
-    out["avg"] = (pv / vv).fillna(out["price"])
-    return out
-
-
 def _probability_model(daily_df: pd.DataFrame, backend: str | None = None) -> Dict:
     """统一概率预测入口：支持 rule / dl / auto 后端切换。"""
     return predict_probability(daily_df, backend=backend, allow_fallback=True)

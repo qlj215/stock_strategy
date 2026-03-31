@@ -17,8 +17,6 @@ venv/
 # Logs
 *.log
 
-# Local caches
-output/cache/
-
-# Keep research outputs by default; uncomment to ignore all generated output
-# output/
+# Generated outputs (keep doc only)
+output/*
+!output/README.md
