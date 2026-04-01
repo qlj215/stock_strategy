@@ -114,7 +114,7 @@ def _group_rolling_max(df: pd.DataFrame, col: str, window: int) -> pd.Series:
     return df.groupby("stock_code")[col].transform(lambda x: x.rolling(window, min_periods=window).max())
 
 
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_features(df: pd.DataFrame, industry_feature_mode: str = "use") -> pd.DataFrame:
     out = df.copy()
     g = out.groupby("stock_code")
 
@@ -178,20 +178,28 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     out["rel_mkt_ret_5"] = out["ret_5"] - out["mkt_ret_5"]
     out["rel_mkt_ret_20"] = out["ret_20"] - out["mkt_ret_20"]
 
-    # 相对行业（无行业时回退市场）
-    if "industry" in out.columns and out["industry"].notna().any():
-        ind = out.dropna(subset=["industry"]).groupby(["date", "industry"])[["ret_1", "ret_5"]].mean().rename(
-            columns={"ret_1": "ind_ret_1", "ret_5": "ind_ret_5"}
-        )
-        out = out.merge(ind, left_on=["date", "industry"], right_index=True, how="left")
-        out["ind_ret_1"] = out["ind_ret_1"].fillna(out["mkt_ret_1"])
-        out["ind_ret_5"] = out["ind_ret_5"].fillna(out["mkt_ret_5"])
-    else:
-        out["ind_ret_1"] = out["mkt_ret_1"]
-        out["ind_ret_5"] = out["mkt_ret_5"]
+    # 相对行业
+    if industry_feature_mode == "use":
+        # 无行业时回退市场
+        if "industry" in out.columns and out["industry"].notna().any():
+            ind = out.dropna(subset=["industry"]).groupby(["date", "industry"])[["ret_1", "ret_5"]].mean().rename(
+                columns={"ret_1": "ind_ret_1", "ret_5": "ind_ret_5"}
+            )
+            out = out.merge(ind, left_on=["date", "industry"], right_index=True, how="left")
+            out["ind_ret_1"] = out["ind_ret_1"].fillna(out["mkt_ret_1"])
+            out["ind_ret_5"] = out["ind_ret_5"].fillna(out["mkt_ret_5"])
+        else:
+            out["ind_ret_1"] = out["mkt_ret_1"]
+            out["ind_ret_5"] = out["mkt_ret_5"]
 
-    out["rel_ind_ret_1"] = out["ret_1"] - out["ind_ret_1"]
-    out["rel_ind_ret_5"] = out["ret_5"] - out["ind_ret_5"]
+        out["rel_ind_ret_1"] = out["ret_1"] - out["ind_ret_1"]
+        out["rel_ind_ret_5"] = out["ret_5"] - out["ind_ret_5"]
+    elif industry_feature_mode == "zero":
+        # 关闭行业相关特征时,保持列存在并置 0,便于下游固定输入维度
+        out["rel_ind_ret_1"] = 0.0
+        out["rel_ind_ret_5"] = 0.0
+    else:
+        raise ValueError(f"不支持的 industry_feature_mode: {industry_feature_mode}")
 
     # 清理中间列
     out = out.drop(columns=["mkt_ret_1", "mkt_ret_5", "mkt_ret_20", "ind_ret_1", "ind_ret_5"], errors="ignore")
@@ -299,6 +307,12 @@ def main():
     p.add_argument("--min-history", type=int, default=60, help="每只股票最小历史长度过滤阈值")
     p.add_argument("--normalize", choices=["xsec_zscore", "none"], default="xsec_zscore", help="特征归一化方式")
     p.add_argument("--drop-na-features", action="store_true", help="删除含缺失特征或核心标签的样本")
+    p.add_argument(
+        "--industry-feature-mode",
+        choices=["use", "zero"],
+        default="use",
+        help="行业特征模式(use=按行业构造相对行业特征, zero=禁用行业并将 rel_ind_ret_* 置0)",
+    )
     args = p.parse_args()
 
     if not (0.0 < args.cls_quantile < 0.5):
@@ -314,7 +328,7 @@ def main():
     panel = _load_panel(in_path)
     print(f"[INFO] input rows={len(panel)} stocks={panel['stock_code'].nunique()} days={panel['date'].nunique()}")
 
-    feat = add_features(panel)
+    feat = add_features(panel, industry_feature_mode=args.industry_feature_mode)
     feat, label_cols = add_labels(feat, horizons=horizons, cls_quantile=args.cls_quantile)
 
     # 最小历史长度过滤（避免前期大量 rolling 缺失）
@@ -324,6 +338,12 @@ def main():
 
     # 归一化
     feat = apply_normalization(feat, feature_cols=FEATURE_COLS, mode=args.normalize)
+
+    # zero 模式下,归一化后行业相对特征保持为 0（避免常数列 z-score 后变 NaN）
+    if args.industry_feature_mode == "zero":
+        for c in ["rel_ind_ret_1", "rel_ind_ret_5"]:
+            if c in feat.columns:
+                feat[c] = 0.0
 
     # 清理无限值
     feat = feat.replace([np.inf, -np.inf], np.nan)
@@ -374,6 +394,7 @@ def main():
         "normalize": args.normalize,
         "min_history": int(args.min_history),
         "drop_na_features": bool(args.drop_na_features),
+        "industry_feature_mode": args.industry_feature_mode,
         "feature_cols": FEATURE_COLS,
         "label_cols": label_cols,
         "feature_missing_ratio": missing_ratio,
@@ -391,6 +412,7 @@ def main():
     print(f"  rows     : {len(feat)}")
     print(f"  stocks   : {feat['stock_code'].nunique() if 'stock_code' in feat.columns else 0}")
     print(f"  days     : {feat['date'].nunique() if 'date' in feat.columns else 0}")
+    print(f"  industry_feature_mode: {args.industry_feature_mode}")
     print(f"  industry_nonnull_ratio: {industry_nonnull_ratio:.4f}")
     if rel_ind_eq_mkt_ratio:
         print(f"  rel_ind_eq_rel_mkt_ratio: {rel_ind_eq_mkt_ratio}")
