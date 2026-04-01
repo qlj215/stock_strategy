@@ -8,7 +8,7 @@
 - [x] 阶段1：数据通路打通（已有 MiniQMT + xtdata）
 - [x] 阶段2：研究数据集构建（本次完成首版）
 - [x] 阶段3：标签与特征工程（本次完成首版）
-- [ ] 阶段4：基线模型实验
+- [x] 阶段4：基线模型实验（本次完成首版）
 - [ ] 阶段5：深度学习模型第一版
 - [ ] 阶段6：组合回测系统
 - [ ] 阶段7：稳健性分析与最终总结
@@ -34,6 +34,15 @@
 - 训练/验证/测试：`1057 / 226 / 228` 日
 - 行业覆盖（方案A）：symbol=1.0，row=1.0
 
+### 更新实跑结果（2026-04-01）
+
+- 参数：`--start 20200101 --end 20260331 --limit 20 --prelisting-null-mode drop`
+- 输出行数：`24105`
+- 股票数：`20`
+- 交易日数：`1511`
+- 上市前空K线剔除：`6115` 行，影响 `10` 只股票
+- 行业覆盖（方案A）：symbol=1.0，row=1.0
+
 ## 阶段3交付
 
 - 脚本：`feature_engineering.py`
@@ -53,6 +62,31 @@
 - 标签周期：`5, 10` 日
 - 行业有效率：`industry_nonnull_ratio=1.0`
 - 行业相对收益非退化：`rel_ind_eq_rel_mkt_ratio={'1d': 0.0, '5d': 0.0}`
+
+### 更新实跑结果（2026-04-01）
+
+- 运行命令：`python feature_engineering.py --drop-na-features --industry-feature-mode zero`
+- 输入（阶段2，drop 后）：`data/processed/daily_panel.parquet`
+- 输出行数：`22590`
+- 股票数：`19`
+- 交易日数：`1431`
+- 行业特征模式：`zero`（`rel_ind_ret_1/5` 全为 0）
+
+## 阶段4交付
+
+- 脚本：`train_baseline.py`
+- 预测结果：`data/baseline/baseline_result.csv`
+- 指标汇总：`data/baseline/baseline_metrics.csv`
+- 实验报告：`data/baseline/baseline_report.md`
+- 阶段总报告：`report/阶段4_基线模型实验整体报告.md`
+
+### 本次实跑结果（2026-04-01）
+
+- 运行命令：`python train_baseline.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --out data/baseline/baseline_result.csv --metrics-out data/baseline/baseline_metrics.csv --report-out data/baseline/baseline_report.md`
+- 目标标签：`label_excess_ret_5d`
+- 预测样本：`8502` 行，覆盖 `448` 个交易日（val+test）
+- Ridge(test)：RankIC=`0.008209`，ICIR=`0.030521`，Long-Short=`-0.004053`，命中率=`0.478405`
+- Tree(test)：RankIC=`-0.013286`，ICIR=`-0.049881`，Long-Short=`-0.013051`，命中率=`0.452443`
 
 ## 说明
 

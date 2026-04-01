@@ -6,23 +6,23 @@
   "train": {
     "start": "2020-01-02",
     "end": "2024-05-16",
-    "rows": 21140,
+    "rows": 15417,
     "days": 1057
   },
   "val": {
     "start": "2024-05-17",
     "end": "2025-04-21",
-    "rows": 4520,
+    "rows": 4294,
     "days": 226
   },
   "test": {
     "start": "2025-04-22",
     "end": "2026-03-31",
-    "rows": 4560,
+    "rows": 4394,
     "days": 228
   },
-  "generated_at": "2026-03-31T21:44:48.449241",
-  "rows": 30220,
+  "generated_at": "2026-04-01T17:06:04.396530",
+  "rows": 24105,
   "stocks": 20,
   "days": 1511,
   "symbols": [
@@ -51,6 +51,11 @@
   "end": "20260331",
   "adjust": "qfq",
   "union_calendar": true,
+  "prelisting_null": {
+    "prelisting_null_mode": "drop",
+    "prelisting_rows_dropped": 6115,
+    "prelisting_stocks_affected": 10
+  },
   "industry": {
     "industry_scheme": "scheme_a_local",
     "industry_map_path": "data/meta/industry_map_scheme_a.csv",

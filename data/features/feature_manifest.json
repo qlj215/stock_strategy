@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-03-31T21:45:02.512063",
-  "input_path": "data\\processed\\daily_panel.parquet",
-  "output_path": "data\\features\\features_v1.parquet",
+  "generated_at": "2026-04-01T17:13:24.587238",
+  "input_path": "C:\\Users\\24333\\Desktop\\university\\股票交易策略项目\\stock_strategy\\data\\processed\\daily_panel.parquet",
+  "output_path": "C:\\Users\\24333\\Desktop\\university\\股票交易策略项目\\stock_strategy\\data\\features\\features_v1.parquet",
   "rows": 22590,
   "stocks": 19,
   "days": 1431,
@@ -15,6 +15,7 @@
   "normalize": "xsec_zscore",
   "min_history": 60,
   "drop_na_features": true,
+  "industry_feature_mode": "zero",
   "feature_cols": [
     "ret_1",
     "ret_3",

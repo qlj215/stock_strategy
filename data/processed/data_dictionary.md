@@ -24,6 +24,7 @@
    - `is_trading=0`
    - `open/high/low/close` 保持缺失
    - `volume/amount` 置 0
+   - 可选 `--prelisting-null-mode drop`：剔除“上市前 + OHLC全空 + is_trading=0”补齐行
 4. 去重规则:`date + stock_code` 保留最后一条。
 
 ### 时间切分
