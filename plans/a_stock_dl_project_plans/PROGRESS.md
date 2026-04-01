@@ -88,6 +88,24 @@
 - Ridge(test)：RankIC=`0.008209`，ICIR=`0.030521`，Long-Short=`-0.004053`，命中率=`0.478405`
 - Tree(test)：RankIC=`-0.013286`，ICIR=`-0.049881`，Long-Short=`-0.013051`，命中率=`0.452443`
 
+### 阶段4.1稳健版更新（2026-04-01）
+
+- 保留 4.0 脚本不变，新增 `train_baseline_v41.py`：
+  - Ridge/Tree 支持独立窗口与重训频率
+  - 动态融合（`blend`）
+  - 时间分段诊断（季度/月份）
+  - 可选行业感知（one-hot / 预测行业中性化）
+- 新增产物：
+  - `data/baseline/baseline_v41_result.csv`
+  - `data/baseline/baseline_v41_metrics.csv`
+  - `data/baseline/baseline_v41_period_metrics.csv`
+  - `data/baseline/baseline_v41_report.md`
+  - `report/阶段4_1_稳健版基线模型实验报告.md`
+- 本次实跑（默认稳健配置）test 结果：
+  - Ridge：RankIC=`0.008209`，ICIR=`0.030521`，Long-Short=`-0.004053`
+  - Tree：RankIC=`0.030204`，ICIR=`0.111556`，Long-Short=`0.007594`
+  - Blend：RankIC=`0.013315`，ICIR=`0.049641`，Long-Short=`0.003334`
+
 ## 说明
 
 - `daily_panel.parquet` 采用（date, stock_code）唯一键。
