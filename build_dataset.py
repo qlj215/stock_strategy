@@ -33,7 +33,10 @@
 5) 日历补齐:
    - 默认补齐并集交易日历(推荐)
    - 用 --no-union-calendar 可关闭
-6) 数据切分:
+6) 上市前空K线处理:
+   - 默认保留上市前补齐空行: --prelisting-null-mode keep
+   - 如需剔除上市前空K线行: --prelisting-null-mode drop
+7) 数据切分:
    - 默认 train/val/test = 0.70/0.15/0.15
    - 调参时保证 train_ratio + val_ratio < 1
 """
@@ -215,6 +218,51 @@ def build_panel(
     return panel
 
 
+def apply_prelisting_null_policy(panel: pd.DataFrame, mode: str):
+    """
+    上市前空K线处理策略。
+
+    - keep: 保留并集日历补齐出的上市前空行（默认）
+    - drop: 仅剔除“上市前 + OHLC全空 + is_trading=0”的补齐行
+    """
+    if mode not in {"keep", "drop"}:
+        raise ValueError(f"不支持的 prelisting_null_mode: {mode}")
+
+    if panel.empty:
+        stats = {
+            "prelisting_null_mode": mode,
+            "prelisting_rows_dropped": 0,
+            "prelisting_stocks_affected": 0,
+        }
+        return panel, stats
+
+    work = panel.sort_values(["stock_code", "date"]).copy()
+
+    # 每只股票首个有效 close 日期（通常可视作上市后首个可用交易日）
+    first_valid_date = work["date"].where(work["close"].notna()).groupby(work["stock_code"]).transform("min")
+
+    ohlc_all_null = work[["open", "high", "low", "close"]].isna().all(axis=1)
+    is_not_trading = pd.to_numeric(work.get("is_trading", 0), errors="coerce").fillna(0).eq(0)
+    is_prelisting = work["date"] < first_valid_date
+
+    drop_mask = is_prelisting & ohlc_all_null & is_not_trading
+
+    if mode == "drop":
+        dropped_rows = int(drop_mask.sum())
+        dropped_stocks = int(work.loc[drop_mask, "stock_code"].nunique()) if dropped_rows > 0 else 0
+        work = work.loc[~drop_mask].reset_index(drop=True)
+    else:
+        dropped_rows = 0
+        dropped_stocks = 0
+
+    stats = {
+        "prelisting_null_mode": mode,
+        "prelisting_rows_dropped": dropped_rows,
+        "prelisting_stocks_affected": dropped_stocks,
+    }
+    return work, stats
+
+
 def apply_industry_enrichment(
     panel: pd.DataFrame,
     industry_scheme: str,
@@ -332,6 +380,7 @@ def write_data_dictionary(path: Path):
    - `is_trading=0`
    - `open/high/low/close` 保持缺失
    - `volume/amount` 置 0
+   - 可选 `--prelisting-null-mode drop`：剔除“上市前 + OHLC全空 + is_trading=0”补齐行
 4. 去重规则:`date + stock_code` 保留最后一条。
 
 ### 时间切分
@@ -355,6 +404,7 @@ def main():
             "  2) 再扩样本规模:--limit 100~500\n"
             "  3) train/val 需满足 train_ratio + val_ratio < 1\n"
             "  4) 方案A行业注入:--industry-scheme scheme_a_local --industry-map-path data/meta/industry_map_scheme_a.csv\n"
+            "  5) 上市前空K线处理:--prelisting-null-mode keep|drop\n"
         ),
     )
     p.add_argument("--start", default="20200101", help="开始日期 YYYYMMDD")
@@ -370,6 +420,12 @@ def main():
     p.add_argument("--train-ratio", type=float, default=0.7, help="训练集日期占比")
     p.add_argument("--val-ratio", type=float, default=0.15, help="验证集日期占比")
     p.add_argument("--no-union-calendar", action="store_true", help="不做并集日历补齐(默认开启补齐)")
+    p.add_argument(
+        "--prelisting-null-mode",
+        choices=["keep", "drop"],
+        default="keep",
+        help="并集补齐后的上市前空K线处理(keep=保留, drop=剔除上市前OHLC全空且is_trading=0行)",
+    )
 
     # 方案A(本地行业映射): 与主线解耦,后续可整体删除
     p.add_argument(
@@ -422,6 +478,9 @@ def main():
     if dup > 0:
         panel = panel.drop_duplicates(subset=["date", "stock_code"], keep="last")
 
+    # 可选:剔除并集补齐产生的上市前空K线行
+    panel, prelisting_stats = apply_prelisting_null_policy(panel, mode=args.prelisting_null_mode)
+
     # 方案A:行业补齐(独立注入层,便于未来删除)
     panel, industry_stats = apply_industry_enrichment(
         panel=panel,
@@ -444,6 +503,7 @@ def main():
     split["end"] = args.end
     split["adjust"] = args.adjust
     split["union_calendar"] = not args.no_union_calendar
+    split["prelisting_null"] = prelisting_stats
     split["industry"] = industry_stats
 
     split_path = Path(args.split_out)
@@ -459,6 +519,9 @@ def main():
     print(f"  rows  : {len(panel)}")
     print(f"  stocks: {panel['stock_code'].nunique()}")
     print(f"  days  : {panel['date'].nunique()}")
+    print(f"  prelisting_null_mode   : {prelisting_stats.get('prelisting_null_mode')}")
+    print(f"  prelisting_rows_dropped: {prelisting_stats.get('prelisting_rows_dropped')}")
+    print(f"  prelisting_stocks_affected: {prelisting_stats.get('prelisting_stocks_affected')}")
     print(f"  industry_scheme        : {industry_stats.get('industry_scheme')}")
     print(f"  industry_symbol_cover  : {industry_stats.get('industry_symbol_coverage')}")
     print(f"  industry_row_cover     : {industry_stats.get('industry_row_coverage')}")

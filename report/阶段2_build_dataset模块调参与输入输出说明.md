@@ -36,6 +36,7 @@
 | `--train-ratio` | 训练集比例 | `0.7` | 常用 0.6~0.75 |
 | `--val-ratio` | 验证集比例 | `0.15` | 常用 0.1~0.2 |
 | `--no-union-calendar` | 关闭并集日历补齐 | 关闭（即默认补齐） | 一般不建议关闭 |
+| `--prelisting-null-mode` | 上市前空K线补齐行处理（`keep`/`drop`） | `keep` | 默认保留；若想去掉上市前补齐空行可设 `drop` |
 | `--industry-scheme` | 行业补齐方案 | `scheme_a_local` | 方案A可用，方案B打通后切 `none` |
 | `--industry-map-path` | 方案A本地行业映射CSV | `data/meta/industry_map_scheme_a.csv` | 映射维护入口 |
 | `--industry-strict` | 映射不全时是否报错 | 关闭 | 数据质量闸门，训练前建议开启一次 |
@@ -65,6 +66,10 @@
   - `industry.industry_symbol_coverage`
   - `industry.industry_row_coverage`
   - `industry.industry_missing_symbols`
+- 上市前空K线策略信息：
+  - `prelisting_null.prelisting_null_mode`
+  - `prelisting_null.prelisting_rows_dropped`
+  - `prelisting_null.prelisting_stocks_affected`
 
 ### 3.3 `data_dictionary.md`
 
@@ -116,6 +121,17 @@ python build_dataset.py \
 - 目标：在方案B不可用时，让 `industry` 字段可用。
 - 关注：`split_manifest.json` 中行业覆盖率是否接近 1。
 
+### 场景 E：剔除上市前补齐空K线（减少 OHLC 空值）
+
+```bash
+python build_dataset.py \
+  --start 20200101 --end 20260331 --limit 20 \
+  --prelisting-null-mode drop
+```
+
+- 目标：只移除“上市前 + OHLC全空 + is_trading=0”补齐行，保留上市后的正常数据与停牌行。
+- 关注：`split_manifest.json` 中 `prelisting_null.prelisting_rows_dropped` 是否符合预期。
+
 ---
 
 ## 5. 当前实现细节与注意事项
@@ -125,6 +141,7 @@ python build_dataset.py \
 
 2. 默认启用“并集交易日历补齐”  
    - 缺失/停牌行会设置 `is_trading=0`，`volume/amount=0`，价格列保持缺失。
+   - 若不希望保留上市前补齐空K线，可用 `--prelisting-null-mode drop` 仅剔除上市前空行。
 
 3. 先去重再输出  
    - 对 `(date, stock_code)` 重复行保留最后一条。

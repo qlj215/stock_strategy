@@ -20,6 +20,7 @@
 3) 分类阈值：--cls-quantile（默认 0.3）
 4) 归一化：--normalize xsec_zscore|none（默认 xsec_zscore）
 5) 缺失处理：--drop-na-features（默认启用）
+6) 行业特征开关：--industry-feature-mode（默认启用）
 
 说明：
 - 特征只由当日及过去数据计算（rolling / pct_change）。

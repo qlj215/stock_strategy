@@ -36,7 +36,7 @@
   - 含基础字段 + 特征字段 + 标签字段
 - `data/features/feature_manifest.json`  
   - 记录参数、列名、样本规模、缺失率等元信息
-  - 包含行业质量指标：`industry_nonnull_ratio`、`rel_ind_eq_rel_mkt_ratio`
+  - 包含行业开关与质量指标：`industry_feature_mode`、`industry_nonnull_ratio`、`rel_ind_eq_rel_mkt_ratio`
 - `data/features/label_spec.md`  
   - 标签定义文档（horizon、分位阈值、归一化模式）
 
@@ -157,6 +157,24 @@ python feature_engineering.py --normalize none
 示例：
 ```bash
 python feature_engineering.py --drop-na-features
+```
+
+---
+
+### F) 行业特征开关（新增）
+
+参数：`--industry-feature-mode {use,zero}`（默认 `use`）
+
+- `use`：按行业构造 `rel_ind_ret_*`（当前默认行为）
+- `zero`：禁用行业相关特征，保留 `rel_ind_ret_*` 列并统一置 0（便于固定输入维度）
+
+建议：
+- 主实验先用 `use`
+- 做“无行业信息”对照组时用 `zero`
+
+示例：
+```bash
+python feature_engineering.py --drop-na-features --industry-feature-mode zero
 ```
 
 ---
