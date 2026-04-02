@@ -36,6 +36,8 @@ stage5_lstm:
 
   # 其他
   device: auto             # auto | cpu | cuda
+  gpu_index: 0             # auto/cuda时优先尝试的GPU索引
+  gpu_min_memory_gb: 0.0   # auto/cuda时GPU最小显存阈值
   seed: 42
   n_quantiles: 5
 
@@ -44,3 +46,44 @@ stage5_lstm:
   metrics_out: data/dl/dl_metrics.csv
   trainlog_out: data/dl/dl_trainlog.csv
   report_out: data/dl/dl_report.md
+
+stage5_1_lstm:
+  in_path: data/features/features_v1.parquet
+  split_manifest: data/processed/split_manifest.json
+  feature_manifest: data/features/feature_manifest.json
+  target_col: label_excess_ret_5d
+
+  seq_len: 20
+
+  # 阶段5.1：近期窗口 + 更频繁重训
+  retrain_every: 20
+  train_window: 750
+  min_train_days: 240
+  min_train_samples: 1200
+  inner_val_days: 40
+
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.1
+
+  loss: huber
+  huber_delta: 1.0
+  epochs: 10
+  batch_size: 256
+  pred_batch_size: 1024
+  lr: 0.001
+  weight_decay: 0.0001
+  max_grad_norm: 1.0
+  early_stop_patience: 4
+  early_stop_min_delta: 1.0e-5
+
+  device: auto
+  gpu_index: 0
+  gpu_min_memory_gb: 4.0
+  seed: 42
+  n_quantiles: 5
+
+  out: data/dl/dl_v51_result.csv
+  metrics_out: data/dl/dl_v51_metrics.csv
+  trainlog_out: data/dl/dl_v51_trainlog.csv
+  report_out: data/dl/dl_v51_report.md

@@ -33,6 +33,9 @@
    - --epochs / --early-stop-patience
 4) 内部早停验证：
    - --inner-val-days 40~80（从历史训练窗口尾部切出）
+5) 设备自动辨识：
+   - --device auto（默认，自动尝试GPU并回退CPU）
+   - --gpu-index / --gpu-min-memory-gb（GPU筛选）
 
 运行示例：
 - 默认（先打通链路）：
@@ -43,6 +46,9 @@
 
 - 近期窗口版本（应对时变）：
   python train_lstm.py --train-window 750 --retrain-every 20
+
+- 自动检测GPU（显存至少8GB，不满足则自动回退CPU）：
+  python train_lstm.py --device auto --gpu-min-memory-gb 8
 """
 
 from __future__ import annotations
@@ -53,7 +59,7 @@ import random
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -111,14 +117,121 @@ def set_global_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def resolve_device(device_arg: str) -> torch.device:
-    if device_arg == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _round_gb(num_bytes: int) -> float:
+    return round(float(num_bytes) / (1024**3), 3)
+
+
+def _probe_cuda_device(index: int) -> tuple[bool, str]:
+    try:
+        dev = torch.device(f"cuda:{index}")
+        x = torch.randn((16, 16), device=dev)
+        y = (x @ x).mean()
+        _ = float(y.detach().cpu().item())
+        torch.cuda.synchronize(index)
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+
+def resolve_device_with_profile(
+    device_arg: str,
+    gpu_index: int,
+    gpu_min_memory_gb: float,
+) -> tuple[torch.device, Dict[str, Any]]:
+    """
+    自动设备辨识逻辑：
+    - device=cpu：固定 CPU
+    - device=cuda：强制 CUDA（不可用则报错）
+    - device=auto：优先可用 CUDA（且满足显存阈值 + 探针通过），否则回退 CPU
+    """
+
+    profile: Dict[str, Any] = {
+        "requested_device": str(device_arg),
+        "selected_device": "",
+        "selection_reason": "",
+        "torch_cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+        "gpu_min_memory_gb": float(gpu_min_memory_gb),
+        "preferred_gpu_index": int(gpu_index),
+        "selected_gpu_index": None,
+        "selected_gpu_name": "",
+        "selected_gpu_total_memory_gb": None,
+        "cuda_devices": [],
+    }
+
+    if profile["torch_cuda_available"]:
+        for idx in range(profile["cuda_device_count"]):
+            prop = torch.cuda.get_device_properties(idx)
+            profile["cuda_devices"].append(
+                {
+                    "index": int(idx),
+                    "name": str(prop.name),
+                    "total_memory_gb": _round_gb(int(prop.total_memory)),
+                    "multi_processor_count": int(getattr(prop, "multi_processor_count", 0)),
+                }
+            )
+
+    def _select_cuda_or_none(require_cuda: bool) -> torch.device | None:
+        if not profile["torch_cuda_available"] or profile["cuda_device_count"] <= 0:
+            if require_cuda:
+                raise SystemExit("[ERROR] 指定 --device cuda 但当前未检测到可用 CUDA 设备")
+            return None
+
+        order = []
+        if 0 <= int(gpu_index) < profile["cuda_device_count"]:
+            order.append(int(gpu_index))
+        for i in range(profile["cuda_device_count"]):
+            if i not in order:
+                order.append(i)
+
+        fail_msgs = []
+        for idx in order:
+            meta = profile["cuda_devices"][idx]
+            mem_gb = float(meta.get("total_memory_gb", 0.0))
+            if mem_gb < float(gpu_min_memory_gb):
+                fail_msgs.append(f"cuda:{idx} 显存 {mem_gb}GB < 阈值 {gpu_min_memory_gb}GB")
+                continue
+
+            ok, msg = _probe_cuda_device(idx)
+            if ok:
+                profile["selected_gpu_index"] = int(idx)
+                profile["selected_gpu_name"] = str(meta.get("name", ""))
+                profile["selected_gpu_total_memory_gb"] = float(mem_gb)
+                profile["selected_device"] = f"cuda:{idx}"
+                profile["selection_reason"] = "CUDA 可用，探针校验通过"
+                return torch.device(f"cuda:{idx}")
+            fail_msgs.append(f"cuda:{idx} 探针失败: {msg}")
+
+        if require_cuda:
+            details = "; ".join(fail_msgs) if fail_msgs else "未知错误"
+            raise SystemExit(f"[ERROR] 指定 --device cuda，但所有候选 GPU 不可用：{details}")
+
+        profile["selection_reason"] = (
+            "CUDA 存在但未通过可用性筛选，自动回退 CPU："
+            + ("; ".join(fail_msgs) if fail_msgs else "无可用候选")
+        )
+        return None
+
+    device_arg = str(device_arg)
+    if device_arg == "cpu":
+        profile["selected_device"] = "cpu"
+        profile["selection_reason"] = "用户显式指定 CPU"
+        return torch.device("cpu"), profile
+
     if device_arg == "cuda":
-        if not torch.cuda.is_available():
-            raise SystemExit("[ERROR] 指定 --device cuda 但当前不可用")
-        return torch.device("cuda")
-    return torch.device("cpu")
+        dev = _select_cuda_or_none(require_cuda=True)
+        assert dev is not None
+        return dev, profile
+
+    # auto
+    dev = _select_cuda_or_none(require_cuda=False)
+    if dev is not None:
+        return dev, profile
+
+    profile["selected_device"] = "cpu"
+    if not profile["selection_reason"]:
+        profile["selection_reason"] = "未检测到可用 CUDA，自动回退 CPU"
+    return torch.device("cpu"), profile
 
 
 def build_sequences(
@@ -467,6 +580,7 @@ def build_markdown_report(
     pred_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
     trainlog_df: pd.DataFrame,
+    device_profile: Dict[str, Any],
 ):
     def _fmt(v):
         if pd.isna(v):
@@ -495,6 +609,29 @@ def build_markdown_report(
     lines.append(f"- loss：`{args.loss}`")
     lines.append(f"- lr/weight_decay：`{args.lr}/{args.weight_decay}`")
     lines.append(f"- epochs/patience：`{args.epochs}/{args.early_stop_patience}`")
+    lines.append("")
+
+    lines.append("### 设备自动辨识")
+    lines.append("")
+    lines.append(f"- requested_device：`{device_profile.get('requested_device', 'NA')}`")
+    lines.append(f"- selected_device：`{device_profile.get('selected_device', 'NA')}`")
+    lines.append(f"- torch_cuda_available：`{device_profile.get('torch_cuda_available', False)}`")
+    lines.append(f"- cuda_device_count：`{device_profile.get('cuda_device_count', 0)}`")
+    lines.append(f"- gpu_min_memory_gb：`{device_profile.get('gpu_min_memory_gb', 0.0)}`")
+    lines.append(f"- selection_reason：`{device_profile.get('selection_reason', '')}`")
+
+    cuda_devices = device_profile.get("cuda_devices", [])
+    if cuda_devices:
+        lines.append("- detected_cuda_devices：")
+        for d in cuda_devices:
+            lines.append(
+                "  - `cuda:{idx}`: {name}, total_memory_gb={mem}, sm_count={sm}".format(
+                    idx=d.get("index", "?"),
+                    name=d.get("name", "unknown"),
+                    mem=d.get("total_memory_gb", "NA"),
+                    sm=d.get("multi_processor_count", "NA"),
+                )
+            )
     lines.append("")
 
     lines.append("## 2. 输出规模")
@@ -583,6 +720,8 @@ def main():
     p.add_argument("--early-stop-min-delta", type=float, default=1e-5, help="早停最小改善")
 
     p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="训练设备")
+    p.add_argument("--gpu-index", type=int, default=0, help="优先使用的 GPU 索引（auto/cuda 时生效）")
+    p.add_argument("--gpu-min-memory-gb", type=float, default=0.0, help="GPU 最小显存阈值（GB，auto/cuda 时生效）")
     p.add_argument("--seed", type=int, default=42, help="随机种子")
     p.add_argument("--n-quantiles", type=int, default=5, help="分层收益分位数")
 
@@ -597,7 +736,11 @@ def main():
         raise SystemExit("[ERROR] --seq-len 至少为 2")
 
     set_global_seed(int(args.seed))
-    device = resolve_device(args.device)
+    device, device_profile = resolve_device_with_profile(
+        device_arg=args.device,
+        gpu_index=int(args.gpu_index),
+        gpu_min_memory_gb=float(args.gpu_min_memory_gb),
+    )
 
     in_path = Path(args.in_path)
     split_path = Path(args.split_manifest)
@@ -637,6 +780,17 @@ def main():
     work = work.sort_values(["stock_code", "date"]).reset_index(drop=True)
 
     print(f"[INFO] device={device}")
+    print(
+        "[INFO] device_probe requested={req} selected={sel} reason={reason}".format(
+            req=device_profile.get("requested_device", "NA"),
+            sel=device_profile.get("selected_device", str(device)),
+            reason=device_profile.get("selection_reason", ""),
+        )
+    )
+    print(
+        f"[INFO] cuda_available={device_profile.get('torch_cuda_available', False)} "
+        f"cuda_device_count={device_profile.get('cuda_device_count', 0)}"
+    )
     print(f"[INFO] rows={len(work)} stocks={work['stock_code'].nunique()} days={work['date'].nunique()}")
     print(f"[INFO] features={len(feature_cols)} target={args.target_col} seq_len={args.seq_len}")
 
@@ -703,6 +857,7 @@ def main():
         pred_df=pred_df,
         metrics_df=metrics_df,
         trainlog_df=trainlog_df,
+        device_profile=device_profile,
     )
 
     print("[DONE] stage5 lstm finished")

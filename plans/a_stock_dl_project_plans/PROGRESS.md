@@ -10,6 +10,7 @@
 - [x] 阶段3：标签与特征工程（本次完成首版）
 - [x] 阶段4：基线模型实验（本次完成首版）
 - [x] 阶段5：深度学习模型第一版（LSTM链路打通首版）
+- [x] 阶段5.1：LSTM稳健增强 + GPU自动辨识（本次完成）
 - [ ] 阶段6：组合回测系统
 - [ ] 阶段7：稳健性分析与最终总结
 
@@ -125,6 +126,24 @@
 - 预测样本：`8483` 行，覆盖 `448` 个交易日（val+test）
 - test（LSTM）：RankIC=`0.004885`，ICIR=`0.018072`，Long-Short=`-0.007630`，命中率=`0.459287`
 - val（LSTM）：RankIC=`0.073435`，ICIR=`0.262638`，Long-Short=`0.005168`，命中率=`0.521196`
+
+### 阶段5.1增强（2026-04-02）
+
+- 代码增强（`train_lstm.py`）：
+  - 新增 GPU 自动辨识与回退：`--device auto|cpu|cuda`（增强版）
+  - 新增 GPU 筛选参数：`--gpu-index`、`--gpu-min-memory-gb`
+  - 运行期增加设备探针日志（requested/selected/reason）
+  - 报告新增“设备自动辨识”小节（记录 GPU 检测与回退原因）
+- 新增参数模板：`model_config.yaml`（补充 stage5.1 推荐配置）
+- 新增产物：
+  - `data/dl/dl_v51_result.csv`
+  - `data/dl/dl_v51_metrics.csv`
+  - `data/dl/dl_v51_trainlog.csv`
+  - `data/dl/dl_v51_report.md`
+  - `report/阶段5_1_LSTM稳健增强与GPU自动辨识报告.md`
+- 本次实跑命令：`python train_lstm.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --device auto --gpu-min-memory-gb 4 --train-window 750 --retrain-every 20 --epochs 10 --inner-val-days 40 --out data/dl/dl_v51_result.csv --metrics-out data/dl/dl_v51_metrics.csv --trainlog-out data/dl/dl_v51_trainlog.csv --report-out data/dl/dl_v51_report.md`
+- 设备识别结果：`torch_cuda_available=False`，自动回退 `cpu`
+- test（LSTM v5.1）：RankIC=`-0.016379`，ICIR=`-0.060335`，Long-Short=`-0.007125`，命中率=`0.482889`
 
 ## 说明
 
