@@ -52,6 +52,13 @@
 - `model_config.yaml` 增加 `stage5_2_selector` 参数模板
 - `plans/a_stock_dl_project_plans/PROGRESS.md` 新增阶段5.2进度与结果
 
+### 2.4 推理权重补齐（2026-04-02）
+
+- `train_lstm.py` 新增权重保存能力：
+  - 最新权重：`data/dl/checkpoints/lstm_latest.pt`
+  - 元信息：`data/dl/checkpoints/lstm_latest_meta.json`
+- 元信息包含特征列、seq_len、目标列、最新训练窗口等，可直接用于后续推理对齐。
+
 ---
 
 ## 3. 关键实验设计

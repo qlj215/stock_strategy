@@ -17,6 +17,8 @@
 - data/dl/dl_metrics.csv
 - data/dl/dl_trainlog.csv
 - data/dl/dl_report.md
+- data/dl/checkpoints/lstm_latest.pt
+- data/dl/checkpoints/lstm_latest_meta.json
 
 调参速查（先调这些）：
 1) 时序长度与滚动：
@@ -54,6 +56,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import copy
 import random
 from dataclasses import dataclass
@@ -432,6 +435,7 @@ def predict_lstm(
 
 def walk_forward_lstm_predict(
     bundle: SequenceBundle,
+    feature_cols: List[str],
     target_col: str,
     train_end: pd.Timestamp,
     args,
@@ -439,7 +443,7 @@ def walk_forward_lstm_predict(
 ):
     dates = np.sort(np.unique(bundle.dates))
     if len(dates) == 0:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), None
 
     train_end_np = np.datetime64(pd.to_datetime(train_end).to_datetime64())
     train_end_idx = int(np.searchsorted(dates, train_end_np, side="right") - 1)
@@ -448,6 +452,7 @@ def walk_forward_lstm_predict(
 
     pred_chunks = []
     trainlog_rows = []
+    latest_checkpoint = None
 
     step = max(1, int(args.retrain_every))
 
@@ -509,6 +514,47 @@ def walk_forward_lstm_predict(
             device=device,
         )
 
+        fit_start_ts = pd.to_datetime(fit_dates[0])
+        fit_end_ts = pd.to_datetime(fit_dates[-1])
+        pred_start_ts = pd.to_datetime(pred_dates[0])
+        pred_end_ts = pd.to_datetime(pred_dates[-1])
+
+        latest_checkpoint = {
+            "created_at": datetime.now().isoformat(),
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+            "model_kwargs": {
+                "input_size": int(x_train.shape[2]),
+                "hidden_size": max(8, int(args.hidden_size)),
+                "num_layers": max(1, int(args.num_layers)),
+                "dropout": max(0.0, float(args.dropout)),
+            },
+            "meta": {
+                "feature_cols": list(feature_cols),
+                "target_col": str(target_col),
+                "seq_len": int(args.seq_len),
+                "fillna": float(args.fillna),
+                "fit_start_date": fit_start_ts.strftime("%Y-%m-%d"),
+                "fit_end_date": fit_end_ts.strftime("%Y-%m-%d"),
+                "pred_start_date": pred_start_ts.strftime("%Y-%m-%d"),
+                "pred_end_date": pred_end_ts.strftime("%Y-%m-%d"),
+                "train_samples": int(train_mask.sum()),
+                "val_samples": int(val_mask.sum()),
+                "best_epoch": int(fit_info.get("best_epoch", 0)),
+                "trained_epochs": int(fit_info.get("trained_epochs", 0)),
+                "best_score": float(fit_info.get("best_score", np.nan)),
+                "device": str(device),
+            },
+        }
+
+        if bool(getattr(args, "save_each_retrain", False)):
+            ckpt_dir = Path(getattr(args, "checkpoint_dir", "data/dl/checkpoints/rolling"))
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_name = (
+                f"lstm_fit_{fit_end_ts.strftime('%Y%m%d')}"
+                f"_pred_{pred_start_ts.strftime('%Y%m%d')}_{pred_end_ts.strftime('%Y%m%d')}.pt"
+            )
+            torch.save(latest_checkpoint, ckpt_dir / ckpt_name)
+
         chunk_df = pd.DataFrame(
             {
                 "date": pd.to_datetime(bundle.dates[pred_mask]),
@@ -516,8 +562,8 @@ def walk_forward_lstm_predict(
                 "split": bundle.splits[pred_mask],
                 target_col: bundle.y[pred_mask],
                 "pred_lstm": y_pred,
-                "fit_start_date": pd.to_datetime(fit_dates[0]),
-                "fit_end_date": pd.to_datetime(fit_dates[-1]),
+                "fit_start_date": fit_start_ts,
+                "fit_end_date": fit_end_ts,
                 "train_samples": int(train_mask.sum()),
                 "val_samples": int(val_mask.sum()),
                 "best_epoch": int(fit_info.get("best_epoch", 0)),
@@ -529,10 +575,10 @@ def walk_forward_lstm_predict(
 
         trainlog_rows.append(
             {
-                "pred_start_date": pd.to_datetime(pred_dates[0]),
-                "pred_end_date": pd.to_datetime(pred_dates[-1]),
-                "fit_start_date": pd.to_datetime(fit_dates[0]),
-                "fit_end_date": pd.to_datetime(fit_dates[-1]),
+                "pred_start_date": pred_start_ts,
+                "pred_end_date": pred_end_ts,
+                "fit_start_date": fit_start_ts,
+                "fit_end_date": fit_end_ts,
                 "train_days": int(len(fit_dates)),
                 "pred_days": int(len(pred_dates)),
                 "train_samples": int(train_mask.sum()),
@@ -569,7 +615,7 @@ def walk_forward_lstm_predict(
     if not trainlog_df.empty:
         trainlog_df = trainlog_df.sort_values("pred_start_date").reset_index(drop=True)
 
-    return pred_df, trainlog_df
+    return pred_df, trainlog_df, latest_checkpoint
 
 
 def build_markdown_report(
@@ -581,6 +627,9 @@ def build_markdown_report(
     metrics_df: pd.DataFrame,
     trainlog_df: pd.DataFrame,
     device_profile: Dict[str, Any],
+    model_out_path: Path | None,
+    model_meta_out_path: Path | None,
+    latest_checkpoint_meta: Dict[str, Any] | None,
 ):
     def _fmt(v):
         if pd.isna(v):
@@ -642,6 +691,18 @@ def build_markdown_report(
     if not trainlog_df.empty:
         lines.append(f"- 平均 best_epoch：`{trainlog_df['best_epoch'].mean():.2f}`")
         lines.append(f"- 平均 best_score：`{trainlog_df['best_score'].mean():.6f}`")
+
+    if model_out_path is not None:
+        lines.append(f"- 最新模型权重：`{model_out_path}`")
+    if model_meta_out_path is not None:
+        lines.append(f"- 最新模型元信息：`{model_meta_out_path}`")
+    if latest_checkpoint_meta:
+        lines.append(
+            f"- 最新模型训练区间：`{latest_checkpoint_meta.get('fit_start_date', 'NA')} -> {latest_checkpoint_meta.get('fit_end_date', 'NA')}`"
+        )
+        lines.append(
+            f"- 最新模型预测覆盖：`{latest_checkpoint_meta.get('pred_start_date', 'NA')} -> {latest_checkpoint_meta.get('pred_end_date', 'NA')}`"
+        )
     lines.append("")
 
     lines.append("## 3. 指标结果")
@@ -730,6 +791,19 @@ def main():
     p.add_argument("--trainlog-out", default="data/dl/dl_trainlog.csv", help="训练日志输出")
     p.add_argument("--report-out", default="data/dl/dl_report.md", help="实验报告输出")
 
+    p.add_argument("--model-out", default="data/dl/checkpoints/lstm_latest.pt", help="最新可推理模型权重输出")
+    p.add_argument(
+        "--model-meta-out",
+        default="data/dl/checkpoints/lstm_latest_meta.json",
+        help="最新可推理模型元信息输出",
+    )
+    p.add_argument("--save-each-retrain", action="store_true", help="保存每次滚动重训checkpoint")
+    p.add_argument(
+        "--checkpoint-dir",
+        default="data/dl/checkpoints/rolling",
+        help="每次重训checkpoint目录（--save-each-retrain 开启时生效）",
+    )
+
     args = p.parse_args()
 
     if int(args.seq_len) < 2:
@@ -750,6 +824,8 @@ def main():
     metrics_path = Path(args.metrics_out)
     trainlog_path = Path(args.trainlog_out)
     report_path = Path(args.report_out)
+    model_out_path = Path(args.model_out)
+    model_meta_out_path = Path(args.model_meta_out)
 
     if not in_path.exists():
         raise SystemExit(f"[ERROR] 输入不存在: {in_path}")
@@ -802,8 +878,9 @@ def main():
     )
     print(f"[INFO] sequence_samples={len(bundle.y)}")
 
-    pred_df, trainlog_df = walk_forward_lstm_predict(
+    pred_df, trainlog_df, latest_checkpoint = walk_forward_lstm_predict(
         bundle=bundle,
+        feature_cols=feature_cols,
         target_col=args.target_col,
         train_end=train_end,
         args=args,
@@ -815,6 +892,33 @@ def main():
 
     trainlog_path.parent.mkdir(parents=True, exist_ok=True)
     trainlog_df.to_csv(trainlog_path, index=False, encoding="utf-8")
+
+    latest_checkpoint_meta = None
+    saved_model_path = None
+    saved_model_meta_path = None
+    if latest_checkpoint is not None:
+        model_out_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(latest_checkpoint, model_out_path)
+        saved_model_path = model_out_path
+
+        latest_checkpoint_meta = dict(latest_checkpoint.get("meta", {}))
+        latest_checkpoint_meta.update(
+            {
+                "saved_at": datetime.now().isoformat(),
+                "model_out": str(model_out_path),
+                "torch_version": str(torch.__version__),
+                "train_script": "train_lstm.py",
+            }
+        )
+
+        model_meta_out_path.parent.mkdir(parents=True, exist_ok=True)
+        model_meta_out_path.write_text(
+            json.dumps(latest_checkpoint_meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        saved_model_meta_path = model_meta_out_path
+    else:
+        print("[WARN] 未生成可保存的最新模型checkpoint（可能训练窗口为空）")
 
     metrics_rows = []
     for split_name in ["val", "test", "all"]:
@@ -858,6 +962,9 @@ def main():
         metrics_df=metrics_df,
         trainlog_df=trainlog_df,
         device_profile=device_profile,
+        model_out_path=saved_model_path,
+        model_meta_out_path=saved_model_meta_path,
+        latest_checkpoint_meta=latest_checkpoint_meta,
     )
 
     print("[DONE] stage5 lstm finished")
@@ -865,6 +972,10 @@ def main():
     print(f"  metrics: {metrics_path}")
     print(f"  trainlog: {trainlog_path}")
     print(f"  report : {report_path}")
+    if saved_model_path is not None:
+        print(f"  model  : {saved_model_path}")
+    if saved_model_meta_path is not None:
+        print(f"  model_meta: {saved_model_meta_path}")
     print(f"  rows   : {len(pred_df)}")
     print(f"  days   : {pred_df['date'].nunique() if len(pred_df) else 0}")
 

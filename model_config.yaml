@@ -46,6 +46,10 @@ stage5_lstm:
   metrics_out: data/dl/dl_metrics.csv
   trainlog_out: data/dl/dl_trainlog.csv
   report_out: data/dl/dl_report.md
+  model_out: data/dl/checkpoints/lstm_latest.pt
+  model_meta_out: data/dl/checkpoints/lstm_latest_meta.json
+  save_each_retrain: false
+  checkpoint_dir: data/dl/checkpoints/rolling
 
 stage5_1_lstm:
   in_path: data/features/features_v1.parquet
@@ -87,9 +91,14 @@ stage5_1_lstm:
   metrics_out: data/dl/dl_v51_metrics.csv
   trainlog_out: data/dl/dl_v51_trainlog.csv
   report_out: data/dl/dl_v51_report.md
+  model_out: data/dl/checkpoints/lstm_v51_latest.pt
+  model_meta_out: data/dl/checkpoints/lstm_v51_latest_meta.json
+  save_each_retrain: false
+  checkpoint_dir: data/dl/checkpoints/rolling_v51
 
 stage5_2_selector:
   # 使用阶段5的LSTM结果 + 阶段4.1 baseline结果做动态模型选择
+  # 对应LSTM推理权重：data/dl/checkpoints/lstm_latest.pt
   lstm_result: data/dl/dl_result.csv
   anchor_result: data/baseline/baseline_v41_result.csv
   anchor_col: pred_tree

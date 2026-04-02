@@ -1,6 +1,6 @@
 # dl_report（阶段5：LSTM 第一版）
 
-生成时间：2026-04-02T10:47:51.742959
+生成时间：2026-04-02T16:23:57.165812
 
 ## 1. 运行配置
 
@@ -17,6 +17,15 @@
 - lr/weight_decay：`0.001/0.0001`
 - epochs/patience：`12/4`
 
+### 设备自动辨识
+
+- requested_device：`auto`
+- selected_device：`cpu`
+- torch_cuda_available：`False`
+- cuda_device_count：`0`
+- gpu_min_memory_gb：`0.0`
+- selection_reason：`未检测到可用 CUDA，自动回退 CPU`
+
 ## 2. 输出规模
 
 - 预测样本行数：`8483`
@@ -24,6 +33,10 @@
 - 重训轮次：`12`
 - 平均 best_epoch：`1.42`
 - 平均 best_score：`0.001725`
+- 最新模型权重：`data\dl\checkpoints\lstm_latest.pt`
+- 最新模型元信息：`data\dl\checkpoints\lstm_latest_meta.json`
+- 最新模型训练区间：`2020-05-08 -> 2026-03-12`
+- 最新模型预测覆盖：`2026-03-13 -> 2026-03-24`
 
 ## 3. 指标结果
 

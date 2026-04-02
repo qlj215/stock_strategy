@@ -116,6 +116,8 @@
 - 指标汇总：`data/dl/dl_metrics.csv`
 - 训练日志：`data/dl/dl_trainlog.csv`
 - 实验报告：`data/dl/dl_report.md`
+- 最新可推理权重：`data/dl/checkpoints/lstm_latest.pt`
+- 最新权重元信息：`data/dl/checkpoints/lstm_latest_meta.json`
 - 阶段总报告：`report/阶段5_LSTM链路打通实验报告.md`
 
 ### 本次实跑结果（2026-04-02）
@@ -127,6 +129,9 @@
 - 预测样本：`8483` 行，覆盖 `448` 个交易日（val+test）
 - test（LSTM）：RankIC=`0.004885`，ICIR=`0.018072`，Long-Short=`-0.007630`，命中率=`0.459287`
 - val（LSTM）：RankIC=`0.073435`，ICIR=`0.262638`，Long-Short=`0.005168`，命中率=`0.521196`
+- 追加（2026-04-02）：补齐可推理模型落盘
+  - 最新权重：`data/dl/checkpoints/lstm_latest.pt`
+  - 元信息：`data/dl/checkpoints/lstm_latest_meta.json`
 
 ### 阶段5.1增强（2026-04-02）
 
@@ -160,6 +165,7 @@
   - `data/dl/dl_v52_sweep.csv`
   - `data/dl/dl_v52_report.md`
   - `report/阶段5_2_test指标冲刺与动态模型选择报告.md`
+- 推理所需 LSTM 权重：`data/dl/checkpoints/lstm_latest.pt`（元信息：`data/dl/checkpoints/lstm_latest_meta.json`）
 - 本次实跑命令：`python train_lstm_v52.py --lstm-result data/dl/dl_result.csv --anchor-result data/baseline/baseline_v41_result.csv --anchor-col pred_tree --lookback-days 8 --label-delay-days 7 --warmup-pick anchor --out data/dl/dl_v52_result.csv --metrics-out data/dl/dl_v52_metrics.csv --selector-log-out data/dl/dl_v52_selector_log.csv --sweep-out data/dl/dl_v52_sweep.csv --report-out data/dl/dl_v52_report.md`
 - 指标对比（test，label_excess_ret_5d）：
   - 阶段5 LSTM：RankIC=`0.004885`，ICIR=`0.018072`，Long-Short=`-0.007630`
