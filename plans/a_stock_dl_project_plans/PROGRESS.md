@@ -11,6 +11,7 @@
 - [x] 阶段4：基线模型实验（本次完成首版）
 - [x] 阶段5：深度学习模型第一版（LSTM链路打通首版）
 - [x] 阶段5.1：LSTM稳健增强 + GPU自动辨识（本次完成）
+- [x] 阶段5.2：LSTM test指标冲刺（动态模型选择）
 - [ ] 阶段6：组合回测系统
 - [ ] 阶段7：稳健性分析与最终总结
 
@@ -144,6 +145,26 @@
 - 本次实跑命令：`python train_lstm.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --device auto --gpu-min-memory-gb 4 --train-window 750 --retrain-every 20 --epochs 10 --inner-val-days 40 --out data/dl/dl_v51_result.csv --metrics-out data/dl/dl_v51_metrics.csv --trainlog-out data/dl/dl_v51_trainlog.csv --report-out data/dl/dl_v51_report.md`
 - 设备识别结果：`torch_cuda_available=False`，自动回退 `cpu`
 - test（LSTM v5.1）：RankIC=`-0.016379`，ICIR=`-0.060335`，Long-Short=`-0.007125`，命中率=`0.482889`
+
+### 阶段5.2冲刺（2026-04-02）
+
+- 新增脚本：`train_lstm_v52.py`（LSTM + anchor 动态模型选择器）
+- 策略思路：
+  - 候选模型：`pred_lstm`（阶段5）与 `pred_tree`（阶段4.1）
+  - 每个交易日按“历史滚动IC”选择当日使用 LSTM 或 anchor
+  - 采用标签可得性延迟：`label_delay_days=7`（避免过于乐观）
+- 新增产物：
+  - `data/dl/dl_v52_result.csv`
+  - `data/dl/dl_v52_metrics.csv`
+  - `data/dl/dl_v52_selector_log.csv`
+  - `data/dl/dl_v52_sweep.csv`
+  - `data/dl/dl_v52_report.md`
+  - `report/阶段5_2_test指标冲刺与动态模型选择报告.md`
+- 本次实跑命令：`python train_lstm_v52.py --lstm-result data/dl/dl_result.csv --anchor-result data/baseline/baseline_v41_result.csv --anchor-col pred_tree --lookback-days 8 --label-delay-days 7 --warmup-pick anchor --out data/dl/dl_v52_result.csv --metrics-out data/dl/dl_v52_metrics.csv --selector-log-out data/dl/dl_v52_selector_log.csv --sweep-out data/dl/dl_v52_sweep.csv --report-out data/dl/dl_v52_report.md`
+- 指标对比（test，label_excess_ret_5d）：
+  - 阶段5 LSTM：RankIC=`0.004885`，ICIR=`0.018072`，Long-Short=`-0.007630`
+  - 阶段5.1 LSTM：RankIC=`-0.016379`，ICIR=`-0.060335`，Long-Short=`-0.007125`
+  - 阶段5.2（stage5_2）：RankIC=`0.029718`，ICIR=`0.108555`，Long-Short=`0.001953`
 
 ## 说明
 

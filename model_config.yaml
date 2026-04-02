@@ -87,3 +87,25 @@ stage5_1_lstm:
   metrics_out: data/dl/dl_v51_metrics.csv
   trainlog_out: data/dl/dl_v51_trainlog.csv
   report_out: data/dl/dl_v51_report.md
+
+stage5_2_selector:
+  # 使用阶段5的LSTM结果 + 阶段4.1 baseline结果做动态模型选择
+  lstm_result: data/dl/dl_result.csv
+  anchor_result: data/baseline/baseline_v41_result.csv
+  anchor_col: pred_tree
+  target_col: label_excess_ret_5d
+
+  # 动态选择器参数
+  lookback_days: 8
+  label_delay_days: 7
+  warmup_pick: anchor
+
+  # 参数扫表候选
+  lookback_grid: 5,6,7,8,9,10,12,15,20,30,40
+  delay_grid: 0,3,5,7,10
+
+  out: data/dl/dl_v52_result.csv
+  metrics_out: data/dl/dl_v52_metrics.csv
+  selector_log_out: data/dl/dl_v52_selector_log.csv
+  sweep_out: data/dl/dl_v52_sweep.csv
+  report_out: data/dl/dl_v52_report.md
