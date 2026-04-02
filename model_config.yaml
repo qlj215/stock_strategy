@@ -1,0 +1,46 @@
+# 阶段5（LSTM）推荐配置
+# 说明：当前 train_lstm.py 以 CLI 参数为准；本文件用于沉淀可复用参数模板。
+
+stage5_lstm:
+  in_path: data/features/features_v1.parquet
+  split_manifest: data/processed/split_manifest.json
+  feature_manifest: data/features/feature_manifest.json
+  target_col: label_excess_ret_5d
+
+  # 时序样本
+  seq_len: 20
+
+  # 滚动训练
+  retrain_every: 40
+  train_window: 0          # 0=扩展窗口；>0=固定最近N日
+  min_train_days: 240
+  min_train_samples: 1200
+  inner_val_days: 60
+
+  # LSTM结构
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.1
+
+  # 训练超参
+  loss: huber              # mse | huber
+  huber_delta: 1.0
+  epochs: 12
+  batch_size: 256
+  pred_batch_size: 1024
+  lr: 0.001
+  weight_decay: 0.0001
+  max_grad_norm: 1.0
+  early_stop_patience: 4
+  early_stop_min_delta: 1.0e-5
+
+  # 其他
+  device: auto             # auto | cpu | cuda
+  seed: 42
+  n_quantiles: 5
+
+  # 输出
+  out: data/dl/dl_result.csv
+  metrics_out: data/dl/dl_metrics.csv
+  trainlog_out: data/dl/dl_trainlog.csv
+  report_out: data/dl/dl_report.md

@@ -9,7 +9,7 @@
 - [x] 阶段2：研究数据集构建（本次完成首版）
 - [x] 阶段3：标签与特征工程（本次完成首版）
 - [x] 阶段4：基线模型实验（本次完成首版）
-- [ ] 阶段5：深度学习模型第一版
+- [x] 阶段5：深度学习模型第一版（LSTM链路打通首版）
 - [ ] 阶段6：组合回测系统
 - [ ] 阶段7：稳健性分析与最终总结
 
@@ -105,6 +105,26 @@
   - Ridge：RankIC=`0.008209`，ICIR=`0.030521`，Long-Short=`-0.004053`
   - Tree：RankIC=`0.030204`，ICIR=`0.111556`，Long-Short=`0.007594`
   - Blend：RankIC=`0.013315`，ICIR=`0.049641`，Long-Short=`0.003334`
+
+## 阶段5交付
+
+- 脚本：`train_lstm.py`
+- 配置模板：`model_config.yaml`
+- 预测结果：`data/dl/dl_result.csv`
+- 指标汇总：`data/dl/dl_metrics.csv`
+- 训练日志：`data/dl/dl_trainlog.csv`
+- 实验报告：`data/dl/dl_report.md`
+- 阶段总报告：`report/阶段5_LSTM链路打通实验报告.md`
+
+### 本次实跑结果（2026-04-02）
+
+- 运行命令：`python train_lstm.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --out data/dl/dl_result.csv --metrics-out data/dl/dl_metrics.csv --trainlog-out data/dl/dl_trainlog.csv --report-out data/dl/dl_report.md`
+- 目标标签：`label_excess_ret_5d`
+- 时序窗口：`seq_len=20`
+- 滚动重训：`retrain_every=40`，扩展窗口（`train_window=0`）
+- 预测样本：`8483` 行，覆盖 `448` 个交易日（val+test）
+- test（LSTM）：RankIC=`0.004885`，ICIR=`0.018072`，Long-Short=`-0.007630`，命中率=`0.459287`
+- val（LSTM）：RankIC=`0.073435`，ICIR=`0.262638`，Long-Short=`0.005168`，命中率=`0.521196`
 
 ## 说明
 
