@@ -20,3 +20,13 @@ venv/
 # Generated outputs (keep doc only)
 output/*
 !output/README.md
+
+# DL artifacts (generated)
+# Keep the latest checkpoint if needed for inference, ignore rolling/temporary artifacts.
+data/dl/checkpoints/rolling/
+data/dl/checkpoints/rolling_v51/
+data/dl/checkpoints/*.tmp
+
+# Optional model exports (regeneratable)
+*.onnx
+*.ckpt
