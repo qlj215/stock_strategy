@@ -13,6 +13,7 @@
 - [x] 阶段5.1：LSTM稳健增强 + GPU自动辨识（本次完成）
 - [x] 阶段5.2：LSTM test指标冲刺（动态模型选择）
 - [ ] 阶段6：组合回测系统
+  - [x] 阶段6.0：链路打通版（独立组合回测脚本 + 多信号统一评估 + 成本前后净值 + 分层曲线）
 - [ ] 阶段7：稳健性分析与最终总结
 
 ## 阶段2交付
@@ -171,6 +172,24 @@
   - 阶段5 LSTM：RankIC=`0.004885`，ICIR=`0.018072`，Long-Short=`-0.007630`
   - 阶段5.1 LSTM：RankIC=`-0.016379`，ICIR=`-0.060335`，Long-Short=`-0.007125`
   - 阶段5.2（stage5_2）：RankIC=`0.029718`，ICIR=`0.108555`，Long-Short=`0.001953`
+
+## 阶段6.0交付（2026-04-09）
+
+- 独立脚本：`portfolio_backtest.py`
+- 详细报告：`report/阶段6_0_组合回测系统链路打通报告.md`
+- 输出目录：`data/backtest/stage6_0/`
+  - `comparison_metrics.csv`
+  - `backtest_report.md`
+  - `*_portfolio_nav.csv`
+  - `*_rebalance_detail.csv`
+  - `*_group_curve.csv`
+- 当前定位：仅完成“阶段5 -> 阶段6”研究链路打通，阶段6总体仍未完成。
+- 首版方法口径：
+  - 使用 `label_fwd_ret_5d` / `label_bench_ret_5d` 作为收益与基准口径
+  - 默认每 `5` 个交易日调仓一次
+  - 默认前 `20%` 高分股票等权组合
+  - 支持多信号源统一比较（如 `pred_v52` / `pred_tree` / `pred_blend`）
+- 已验证 test 样本下可产出稳定结果；其中 `stage5_2_selector` 的 net_total_return=`0.298905`、Sharpe=`1.230961`，但当前仍属于研究级简化回测，不应过度外推为实盘结论。
 
 ## 说明
 
