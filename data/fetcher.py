@@ -24,6 +24,7 @@ _MINIQMT_LAUNCH_RESULT: Dict[str, Any] = {
     "success": False,
     "path": "",
     "detail": "",
+    "already_running": False,
 }
 
 
@@ -84,6 +85,51 @@ def _candidate_miniqmt_paths() -> List[str]:
     return out
 
 
+def _candidate_miniqmt_process_names() -> List[str]:
+    names = [os.path.basename(p) for p in _candidate_miniqmt_paths() if str(p or "").strip()]
+    names.append("XtMiniQmt.exe")
+
+    out: List[str] = []
+    seen = set()
+    for name in names:
+        name = str(name or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _is_miniqmt_running() -> bool:
+    if not (os.name == "nt" or _is_wsl()):
+        return False
+
+    for process_name in _candidate_miniqmt_process_names():
+        try:
+            if os.name == "nt":
+                cmd = ["tasklist", "/FI", f"IMAGENAME eq {process_name}"]
+            else:
+                cmd = ["cmd.exe", "/C", "tasklist", "/FI", f"IMAGENAME eq {process_name}"]
+
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=10,
+            )
+            output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+            if process_name.lower() in output:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _launch_miniqmt_if_needed() -> None:
     global _MINIQMT_LAUNCH_ATTEMPTED, _MINIQMT_LAUNCH_RESULT
 
@@ -97,7 +143,18 @@ def _launch_miniqmt_if_needed() -> None:
         "success": False,
         "path": "",
         "detail": "未找到可用 MiniQMT 路径",
+        "already_running": False,
     }
+
+    if _is_miniqmt_running():
+        _MINIQMT_LAUNCH_RESULT = {
+            "attempted": True,
+            "success": True,
+            "path": "",
+            "detail": "检测到 MiniQMT 已在运行，跳过自动启动",
+            "already_running": True,
+        }
+        return
 
     for candidate in _candidate_miniqmt_paths():
         if not _path_exists_cross_platform(candidate):
@@ -120,6 +177,7 @@ def _launch_miniqmt_if_needed() -> None:
                     "success": False,
                     "path": candidate,
                     "detail": "当前环境不是 Windows/WSL，跳过 MiniQMT 自动启动",
+                    "already_running": False,
                 }
                 return
 
@@ -130,6 +188,7 @@ def _launch_miniqmt_if_needed() -> None:
                 "success": True,
                 "path": candidate,
                 "detail": "已尝试自动启动 MiniQMT",
+                "already_running": False,
             }
             return
         except Exception as e:
@@ -138,6 +197,7 @@ def _launch_miniqmt_if_needed() -> None:
                 "success": False,
                 "path": candidate,
                 "detail": str(e),
+                "already_running": False,
             }
 
 
