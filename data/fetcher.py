@@ -3,28 +3,166 @@
 
 说明：
 1) 不再依赖 AKShare 的公网抓取链路，避免 Eastmoney 限流/风控导致的不稳定。
-2) 行情由本机 MiniQMT 提供：运行脚本前需先启动并保持 MiniQMT 在线。
+2) 行情由本机 MiniQMT 提供；本模块可按配置自动尝试拉起 MiniQMT。
 3) 保留原 fetch_stock_data 接口签名，尽量减少上层调用改动。
 """
 
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 import time
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 
 
+_MINIQMT_LAUNCH_ATTEMPTED = False
+_MINIQMT_LAUNCH_RESULT: Dict[str, Any] = {
+    "attempted": False,
+    "success": False,
+    "path": "",
+    "detail": "",
+}
+
+
+def _is_wsl() -> bool:
+    return bool(os.environ.get("WSL_DISTRO_NAME")) or ("microsoft" in os.uname().release.lower())
+
+
+def _wsl_to_windows_path(path: str) -> str:
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    if re.match(r"^[A-Za-z]:\\", p):
+        return p
+    m = re.match(r"^/mnt/([a-zA-Z])/(.*)$", p)
+    if not m:
+        return p
+    drive = m.group(1).upper()
+    rest = m.group(2).replace("/", "\\")
+    return f"{drive}:\\{rest}"
+
+
+def _windows_to_wsl_path(path: str) -> str:
+    p = str(path or "").strip()
+    m = re.match(r"^([A-Za-z]):\\(.*)$", p)
+    if not m:
+        return p
+    drive = m.group(1).lower()
+    rest = m.group(2).replace("\\", "/")
+    return f"/mnt/{drive}/{rest}"
+
+
+def _path_exists_cross_platform(path: str) -> bool:
+    p = str(path or "").strip()
+    if not p:
+        return False
+    if os.path.exists(p):
+        return True
+    alt = _windows_to_wsl_path(p)
+    return alt != p and os.path.exists(alt)
+
+
+def _candidate_miniqmt_paths() -> List[str]:
+    candidates = [
+        os.environ.get("MINIQMT_EXE", ""),
+        os.environ.get("XTMINIQMT_EXE", ""),
+        os.environ.get("QMT_EXE", ""),
+        r"C:\Users\24333\国金证券QMT交易端\bin.x64\XtMiniQmt.exe",
+    ]
+
+    out: List[str] = []
+    seen = set()
+    for p in candidates:
+        p = str(p or "").strip()
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def _launch_miniqmt_if_needed() -> None:
+    global _MINIQMT_LAUNCH_ATTEMPTED, _MINIQMT_LAUNCH_RESULT
+
+    auto_start = str(os.environ.get("MINIQMT_AUTO_START", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    if not auto_start or _MINIQMT_LAUNCH_ATTEMPTED:
+        return
+
+    _MINIQMT_LAUNCH_ATTEMPTED = True
+    _MINIQMT_LAUNCH_RESULT = {
+        "attempted": True,
+        "success": False,
+        "path": "",
+        "detail": "未找到可用 MiniQMT 路径",
+    }
+
+    for candidate in _candidate_miniqmt_paths():
+        if not _path_exists_cross_platform(candidate):
+            continue
+
+        try:
+            if os.name == "nt":
+                subprocess.Popen([candidate], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif _is_wsl():
+                win_path = _wsl_to_windows_path(candidate)
+                subprocess.Popen(
+                    ["cmd.exe", "/C", "start", "", win_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                # 非 Windows/WSL 环境不强行启动，避免误调用 wine 等未知环境
+                _MINIQMT_LAUNCH_RESULT = {
+                    "attempted": True,
+                    "success": False,
+                    "path": candidate,
+                    "detail": "当前环境不是 Windows/WSL，跳过 MiniQMT 自动启动",
+                }
+                return
+
+            wait_sec = float(os.environ.get("MINIQMT_STARTUP_WAIT_SEC", "3"))
+            time.sleep(max(0.0, wait_sec))
+            _MINIQMT_LAUNCH_RESULT = {
+                "attempted": True,
+                "success": True,
+                "path": candidate,
+                "detail": "已尝试自动启动 MiniQMT",
+            }
+            return
+        except Exception as e:
+            _MINIQMT_LAUNCH_RESULT = {
+                "attempted": True,
+                "success": False,
+                "path": candidate,
+                "detail": str(e),
+            }
+
+
+def get_miniqmt_launch_status() -> Dict[str, Any]:
+    return dict(_MINIQMT_LAUNCH_RESULT)
+
+
 def _load_xtdata():
+    _launch_miniqmt_if_needed()
     try:
         from xtquant import xtdata  # type: ignore
 
         return xtdata
     except Exception as e:
+        launch_msg = ""
+        if _MINIQMT_LAUNCH_RESULT.get("attempted"):
+            launch_msg = (
+                f" 自动启动状态: success={_MINIQMT_LAUNCH_RESULT.get('success')},"
+                f" path={_MINIQMT_LAUNCH_RESULT.get('path')},"
+                f" detail={_MINIQMT_LAUNCH_RESULT.get('detail')}。"
+            )
         raise RuntimeError(
             "未检测到可用 xtquant/xtdata。请使用 Python 3.6~3.13 安装 xtquant，"
-            "并先启动 MiniQMT 客户端。"
+            "并确认 MiniQMT 客户端可用。"
+            + launch_msg
         ) from e
 
 
