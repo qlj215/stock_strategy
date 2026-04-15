@@ -226,6 +226,20 @@ function downloadScan(){
   downloadTextFile(`\ufeff${csvLines.join('\n')}`, buildScanFilename(latestScanResponse, 'csv'), 'text/csv');
 }
 
+function buildIntradayXAxis(){
+  return {
+    type:'date',
+    showgrid:false,
+    tickformat:'%m-%d %H:%M',
+    hoverformat:'%Y-%m-%d %H:%M',
+    rangebreaks:[
+      { bounds:['sat', 'mon'] },
+      { pattern:'hour', bounds:[11.5, 13] },
+      { pattern:'hour', bounds:[15, 9.5] }
+    ]
+  };
+}
+
 async function loadOverview(){
   const symbol = document.getElementById('symbol').value.trim();
   const days = document.getElementById('days').value;
@@ -270,6 +284,7 @@ async function loadOverview(){
     {x: xi, y: d.intraday.map(i => i.volume), yaxis:'y2', type:'bar', name:'分时量', marker:{opacity:0.25}}
   ], {
     paper_bgcolor:'#171b2e', plot_bgcolor:'#171b2e', font:{color:'#e8ebff'},
+    xaxis: buildIntradayXAxis(),
     yaxis:{title:'价格'}, yaxis2:{title:'成交量', overlaying:'y', side:'right', showgrid:false}
   });
 
