@@ -56,6 +56,18 @@
         <select id="industry"></select>
       </span>
 
+      <label>板块：</label>
+      <select id="scanBoardFilter">
+        <option value="all" selected>全部</option>
+        <option value="gem_only">仅创业板</option>
+        <option value="exclude_gem">排除创业板</option>
+        <option value="main_only">仅主板</option>
+        <option value="star_only">仅科创板</option>
+        <option value="exclude_star">排除科创板</option>
+        <option value="bj_only">仅北交所</option>
+        <option value="exclude_bj">排除北交所</option>
+      </select>
+
       <label>样本数上限：</label><input id="scanLimit" type="number" value="30" min="1" max="400" style="width:90px" />
       <label>排序：</label>
       <select id="scanSortBy">
@@ -66,6 +78,12 @@
         <option value="turnover">成交额</option>
       </select>
       <button onclick="runScan()">开始批量对比</button>
+      <label>下载：</label>
+      <select id="scanDownloadFormat">
+        <option value="csv" selected>CSV</option>
+        <option value="txt">TXT</option>
+      </select>
+      <button onclick="downloadScan()">下载最新结果</button>
     </div>
     <div id="scanResult" class="muted" style="margin-top:10px">等待扫描...</div>
   </div>
@@ -89,9 +107,124 @@
 
 <script>
 let state = { symbol: '000001', days: 60 };
+let latestScanResponse = null;
 
 function pct(v){ return (v*100).toFixed(1) + '%'; }
 function fmt(n){ return Number(n || 0).toLocaleString(); }
+function fmtProb(v){ return v == null ? '-' : pct(Number(v)); }
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[ch]));
+}
+function csvEscape(value){
+  const text = String(value ?? '');
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+function sanitizeFilenamePart(value){
+  const text = String(value ?? '').trim().replace(/[\\/:*?"<>|\s]+/g, '_');
+  return text.replace(/^_+|_+$/g, '') || 'scan';
+}
+function formatExportNumber(value, digits = 3){
+  if (value == null || value === '' || Number.isNaN(Number(value))) return '';
+  return Number(value).toFixed(digits);
+}
+function formatExportPercent(value, digits = 2){
+  if (value == null || value === '' || Number.isNaN(Number(value))) return '';
+  return `${Number(value).toFixed(digits)}%`;
+}
+function formatExportProb(value, digits = 2){
+  if (value == null || value === '' || Number.isNaN(Number(value))) return '';
+  return `${(Number(value) * 100).toFixed(digits)}%`;
+}
+function downloadTextFile(content, filename, mimeType){
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+function buildScanExportMeta(scan){
+  return [
+    ['扫描时间', scan.scan_time || ''],
+    ['模式', scan.mode_label || scan.mode || ''],
+    ['范围', scan.industry || ''],
+    ['板块筛选', scan.board_filter_label || '全部'],
+    ['排序', scan.sort_by_label || scan.sort_by || ''],
+    ['观察窗口', scan.days ? `${scan.days}日` : ''],
+    ['筛选后样本池', scan.filtered_universe ?? ''],
+    ['请求样本数', scan.requested ?? ''],
+    ['成功', scan.success ?? ''],
+    ['失败', scan.failed ?? '']
+  ];
+}
+function buildScanExportRows(scan){
+  return (scan.top || []).map(item => [
+    item.symbol || '',
+    item.name || '',
+    item.board || '',
+    formatExportNumber(item.close, 3),
+    formatExportPercent(item.pct, 2),
+    formatExportProb(item.today_up, 2),
+    formatExportProb(item.next_5d_up, 2),
+    formatExportProb(item.long_up, 2),
+    formatExportNumber(item.turnover, 2),
+    item.model_backend || '',
+    item.model_backend_fallback ? '是' : ''
+  ]);
+}
+function buildScanFilename(scan, ext){
+  const scope = sanitizeFilenamePart(scan.mode === 'industry' ? scan.industry : '全A股');
+  const filter = sanitizeFilenamePart(scan.board_filter_label || '全部');
+  const stamp = sanitizeFilenamePart((scan.scan_time || new Date().toISOString()).replace(/:/g, '-'));
+  return `market_scan_${scope}_${filter}_${stamp}.${ext}`;
+}
+function downloadScan(){
+  if (!latestScanResponse) {
+    alert('请先运行一次批量对比，再下载结果。');
+    return;
+  }
+
+  const rows = latestScanResponse.top || [];
+  if (!rows.length) {
+    alert('最新扫描没有可下载的数据。');
+    return;
+  }
+
+  const format = document.getElementById('scanDownloadFormat').value;
+  const meta = buildScanExportMeta(latestScanResponse);
+  const headers = ['代码', '名称', '板块', '收盘', '涨跌%', '当日上涨概率', '5日上涨概率', '长期上涨概率', '成交额', '模型后端', '后端回退'];
+  const dataRows = buildScanExportRows(latestScanResponse);
+
+  if (format === 'txt') {
+    const lines = [
+      '市场扫描结果',
+      ...meta.map(([k, v]) => `${k}\t${v}`),
+      '',
+      headers.join('\t'),
+      ...dataRows.map(row => row.join('\t'))
+    ];
+    downloadTextFile(`\ufeff${lines.join('\n')}`, buildScanFilename(latestScanResponse, 'txt'), 'text/plain');
+    return;
+  }
+
+  const csvLines = [
+    ['项目', '值'],
+    ...meta,
+    [],
+    headers,
+    ...dataRows
+  ].map(row => row.map(csvEscape).join(','));
+  downloadTextFile(`\ufeff${csvLines.join('\n')}`, buildScanFilename(latestScanResponse, 'csv'), 'text/csv');
+}
 
 async function loadOverview(){
   const symbol = document.getElementById('symbol').value.trim();
@@ -185,11 +318,12 @@ async function loadSectors(){
 async function runScan(){
   const mode = document.getElementById('scanMode').value;
   const industry = document.getElementById('industry').value;
+  const boardFilter = document.getElementById('scanBoardFilter').value;
   const limit = document.getElementById('scanLimit').value;
   const sortBy = document.getElementById('scanSortBy').value;
   const days = document.getElementById('days').value;
 
-  const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days });
+  const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days, board_filter: boardFilter });
   if (mode === 'industry') params.set('industry', industry);
 
   document.getElementById('scanResult').innerHTML = '扫描中，请稍候（样本越大越慢）...';
@@ -201,20 +335,24 @@ async function runScan(){
     return;
   }
 
+  latestScanResponse = d;
+
   const rows = d.top || [];
   if (!rows.length) {
-    document.getElementById('scanResult').innerText = '没有可用结果';
+    document.getElementById('scanResult').innerText = `没有可用结果（范围：${d.industry}，板块筛选：${d.board_filter_label || '全部'}）`;
     return;
   }
 
   const html = `
-    <div class="muted">范围：${d.industry} ｜ 请求 ${d.requested} ｜ 成功 ${d.success} ｜ 失败 ${d.failed}</div>
+    <div class="muted">范围：${escapeHtml(d.industry)} ｜ 板块筛选：${escapeHtml(d.board_filter_label || '全部')} ｜ 排序：${escapeHtml(d.sort_by_label || d.sort_by || '')} ｜ 时间：${escapeHtml(d.scan_time || '-')}</div>
+    <div class="muted">筛选后样本池：${d.filtered_universe ?? '-'} ｜ 请求 ${d.requested} ｜ 成功 ${d.success} ｜ 失败 ${d.failed}</div>
     <div style="overflow:auto;margin-top:8px">
       <table style="width:100%;border-collapse:collapse;font-size:14px">
         <thead>
           <tr>
             <th style="text-align:left;padding:6px">代码</th>
             <th style="text-align:left;padding:6px">名称</th>
+            <th style="text-align:left;padding:6px">板块</th>
             <th style="text-align:right;padding:6px">收盘</th>
             <th style="text-align:right;padding:6px">涨跌%</th>
             <th style="text-align:right;padding:6px">当日上涨概率</th>
@@ -226,13 +364,14 @@ async function runScan(){
         <tbody>
           ${rows.map(r => `
             <tr>
-              <td style="padding:6px">${r.symbol || ''}</td>
-              <td style="padding:6px">${r.name || '-'}</td>
+              <td style="padding:6px">${escapeHtml(r.symbol || '')}</td>
+              <td style="padding:6px">${escapeHtml(r.name || '-')}</td>
+              <td style="padding:6px">${escapeHtml(r.board || '-')}</td>
               <td style="padding:6px;text-align:right">${r.close ?? '-'}</td>
-              <td style="padding:6px;text-align:right">${r.pct ?? '-'}%</td>
-              <td style="padding:6px;text-align:right">${pct(r.today_up || 0)}</td>
-              <td style="padding:6px;text-align:right">${pct(r.next_5d_up || 0)}</td>
-              <td style="padding:6px;text-align:right">${pct(r.long_up || 0)}</td>
+              <td style="padding:6px;text-align:right">${r.pct == null ? '-' : `${r.pct}%`}</td>
+              <td style="padding:6px;text-align:right">${fmtProb(r.today_up)}</td>
+              <td style="padding:6px;text-align:right">${fmtProb(r.next_5d_up)}</td>
+              <td style="padding:6px;text-align:right">${fmtProb(r.long_up)}</td>
               <td style="padding:6px;text-align:right">${fmt(r.turnover || 0)}</td>
             </tr>
           `).join('')}

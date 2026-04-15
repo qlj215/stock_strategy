@@ -50,10 +50,81 @@ SECTOR_CACHE_TTL_SEC = 300
 CHALLENGES = {}
 REVIEWS = {}
 REPLAY_JOBS = {}
+SCAN_SORT_LABELS = {
+    "today_up": "当日上涨概率",
+    "next_5d_up": "5日上涨概率",
+    "long_up": "长期上涨概率",
+    "pct": "当日涨跌幅",
+    "turnover": "成交额",
+}
+BOARD_FILTER_LABELS = {
+    "all": "全部",
+    "gem_only": "仅创业板",
+    "exclude_gem": "排除创业板",
+    "main_only": "仅主板",
+    "star_only": "仅科创板",
+    "exclude_star": "排除科创板",
+    "bj_only": "仅北交所",
+    "exclude_bj": "排除北交所",
+}
 
 
 def _today_str():
     return datetime.now().strftime("%Y%m%d")
+
+
+def _normalize_plain_symbol(symbol: str) -> str:
+    s = str(symbol or "").strip().upper()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    elif s.startswith(("SH", "SZ", "BJ")) and s[2:].isdigit():
+        s = s[2:]
+
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits.zfill(6) if digits else ""
+
+
+def _classify_symbol_board(symbol: str) -> str:
+    code = _normalize_plain_symbol(symbol)
+    if code.startswith(("300", "301")):
+        return "创业板"
+    if code.startswith(("688", "689")):
+        return "科创板"
+    if code.startswith(("8", "4")):
+        return "北交所"
+    if code.startswith(("600", "601", "603", "605", "000", "001", "002", "003")):
+        return "主板"
+    return "其他"
+
+
+def _normalize_board_filter(board_filter: str) -> str:
+    key = str(board_filter or "").strip()
+    return key if key in BOARD_FILTER_LABELS else "all"
+
+
+def _board_filter_matches(symbol: str, board_filter: str) -> bool:
+    board = _classify_symbol_board(symbol)
+    if board_filter == "gem_only":
+        return board == "创业板"
+    if board_filter == "exclude_gem":
+        return board != "创业板"
+    if board_filter == "main_only":
+        return board == "主板"
+    if board_filter == "star_only":
+        return board == "科创板"
+    if board_filter == "exclude_star":
+        return board != "科创板"
+    if board_filter == "bj_only":
+        return board == "北交所"
+    if board_filter == "exclude_bj":
+        return board != "北交所"
+    return True
+
+
+def _apply_board_filter(symbols: list[str], board_filter: str) -> list[str]:
+    if board_filter == "all":
+        return list(symbols)
+    return [s for s in symbols if _board_filter_matches(s, board_filter)]
 
 
 def _get_sector_registry(force_refresh: bool = False) -> Dict:
@@ -633,6 +704,7 @@ def market_scan():
     mode = (request.args.get("mode") or "industry").strip()  # industry | all
     industry = (request.args.get("industry") or "").strip()
     sort_by = (request.args.get("sort_by") or "next_5d_up").strip()
+    board_filter = _normalize_board_filter(request.args.get("board_filter"))
     days = max(20, min(int(request.args.get("days", "60")), 250))
     limit = max(1, min(int(request.args.get("limit", "30")), 400))
     backend = (request.args.get("backend") or "").strip() or None
@@ -647,6 +719,7 @@ def market_scan():
         snapshots = {}
 
         sector_source = "all_mode"
+        filtered_universe = 0
 
         if mode == "industry":
             if not industry:
@@ -656,16 +729,16 @@ def market_scan():
             available_sectors = set(reg.get("sectors", []))
 
             if reg.get("source") == "miniqmt_dynamic" and industry in available_sectors:
-                symbols = list_symbols_in_dynamic_sector(industry, limit=limit)
+                symbols = list_symbols_in_dynamic_sector(industry, limit=None)
                 sector_source = "miniqmt_dynamic"
             else:
-                symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS.get(industry, [])][:limit]
+                symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS.get(industry, [])]
                 sector_source = "local_fallback"
 
             if not symbols:
                 # 动态源拿不到时，再兜底一次本地池
                 if industry in LOCAL_SECTOR_SYMBOLS:
-                    symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS[industry]][:limit]
+                    symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS[industry]]
                     sector_source = "local_fallback"
                 else:
                     return jsonify({
@@ -673,6 +746,9 @@ def market_scan():
                         "available": sorted(list(available_sectors)) if available_sectors else sorted(LOCAL_SECTOR_SYMBOLS.keys()),
                     }), 400
 
+            symbols = _apply_board_filter(symbols, board_filter)
+            filtered_universe = len(symbols)
+            symbols = symbols[:limit]
             names_map = {s: get_symbol_name(s) for s in symbols}
 
         elif mode == "all":
@@ -680,6 +756,28 @@ def market_scan():
             all_symbols = list_a_share_symbols()
             if not all_symbols:
                 return jsonify({"error": "无法获取全A股列表，请确认 MiniQMT 已连接且行情可用。"}), 500
+
+            all_symbols = _apply_board_filter(all_symbols, board_filter)
+            filtered_universe = len(all_symbols)
+            if not all_symbols:
+                return jsonify({
+                    "mode": mode,
+                    "mode_label": "全A股遍历（按成交额优先）",
+                    "industry": "全A股",
+                    "sector_source": sector_source,
+                    "board_filter": board_filter,
+                    "board_filter_label": BOARD_FILTER_LABELS[board_filter],
+                    "sort_by": sort_by,
+                    "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
+                    "days": days,
+                    "requested": 0,
+                    "success": 0,
+                    "failed": 0,
+                    "filtered_universe": filtered_universe,
+                    "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "model_backend": get_backend_runtime_status(backend),
+                    "top": [],
+                })
 
             snapshots = get_realtime_snapshots(all_symbols, chunk_size=800)
             if not snapshots:
@@ -717,6 +815,7 @@ def market_scan():
 
                 if names_map.get(s):
                     item["name"] = names_map[s]
+                item["board"] = _classify_symbol_board(s)
                 rows.append(item)
             except Exception:
                 failed.append(s)
@@ -725,11 +824,17 @@ def market_scan():
 
         return jsonify({
             "mode": mode,
+            "mode_label": "行业内对比" if mode == "industry" else "全A股遍历（按成交额优先）",
             "industry": industry if mode == "industry" else "全A股",
             "sector_source": sector_source,
             "model_backend": get_backend_runtime_status(backend),
             "days": days,
             "sort_by": sort_by,
+            "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
+            "board_filter": board_filter,
+            "board_filter_label": BOARD_FILTER_LABELS[board_filter],
+            "filtered_universe": filtered_universe or len(symbols),
+            "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "requested": len(symbols),
             "success": len(rows),
             "failed": len(failed),
