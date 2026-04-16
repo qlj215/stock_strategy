@@ -5,7 +5,9 @@ import random
 import uuid
 import subprocess
 import threading
-from typing import Dict, Tuple
+import re
+from collections import defaultdict
+from typing import Any, Dict, List, Tuple
 
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
@@ -47,6 +49,13 @@ SECTOR_CACHE = {
     "status": {},
 }
 SECTOR_CACHE_TTL_SEC = 300
+HISTORY_PANEL_CACHE = {
+    "path": "",
+    "mtime": 0.0,
+    "panel": None,
+    "symbols": set(),
+    "industries": [],
+}
 CHALLENGES = {}
 REVIEWS = {}
 REPLAY_JOBS = {}
@@ -66,6 +75,26 @@ BOARD_FILTER_LABELS = {
     "exclude_star": "排除科创板",
     "bj_only": "仅北交所",
     "exclude_bj": "排除北交所",
+}
+BACKTEST_UNIVERSE_LABELS = {
+    "manual": "手动股票池",
+    "main_board": "全市场主板",
+    "industry": "单一行业",
+}
+BACKTEST_STRATEGY_LABELS = {
+    "rule": "直接规则策略",
+    "model": "神经网络 / 机器学习策略",
+}
+BACKTEST_RULE_PRESET_LABELS = {
+    "limit_up_follow": "涨停次日跟随",
+}
+BACKTEST_MODEL_PRESET_LABELS = {
+    "topk_prob_1d": "1日上涨概率 Top-K 等权",
+}
+BACKTEST_MODEL_BACKEND_LABELS = {
+    "rule": "rule / 内置规则",
+    "dl": "dl / 外部深度学习",
+    "auto": "auto / 优先 DL，失败回退 rule",
 }
 
 
@@ -127,6 +156,60 @@ def _apply_board_filter(symbols: list[str], board_filter: str) -> list[str]:
     return [s for s in symbols if _board_filter_matches(s, board_filter)]
 
 
+def _history_panel_path() -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, "data", "processed", "daily_panel.parquet")
+
+
+def _load_history_panel(force_refresh: bool = False) -> pd.DataFrame:
+    """
+    历史回测统一使用本地日线面板，避免对实时接口做大批量回看。
+    """
+    path = _history_panel_path()
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"历史面板不存在：{path}")
+
+    mtime = os.path.getmtime(path)
+    cached = HISTORY_PANEL_CACHE.get("panel")
+    if (not force_refresh) and cached is not None and float(HISTORY_PANEL_CACHE.get("mtime", 0.0)) == float(mtime):
+        return cached
+
+    cols = ["date", "stock_code", "open", "high", "low", "close", "volume", "amount", "is_trading", "industry"]
+    panel = pd.read_parquet(path, columns=cols)
+    panel["date"] = pd.to_datetime(panel["date"], errors="coerce")
+    panel["stock_code"] = panel["stock_code"].astype(str).map(_normalize_plain_symbol)
+
+    for col in ["open", "high", "low", "close", "volume", "amount", "is_trading"]:
+        if col in panel.columns:
+            panel[col] = pd.to_numeric(panel[col], errors="coerce")
+
+    if "industry" not in panel.columns:
+        panel["industry"] = ""
+    panel["industry"] = panel["industry"].fillna("").astype(str).str.strip()
+    panel = panel.dropna(subset=["date"]).sort_values(["stock_code", "date"]).reset_index(drop=True)
+
+    symbols = sorted({s for s in panel["stock_code"].tolist() if s})
+    industries = sorted({s for s in panel["industry"].tolist() if s})
+    HISTORY_PANEL_CACHE.update({
+        "path": path,
+        "mtime": mtime,
+        "panel": panel,
+        "symbols": set(symbols),
+        "industries": industries,
+    })
+    return panel
+
+
+def _panel_symbols() -> set[str]:
+    _load_history_panel(force_refresh=False)
+    return set(HISTORY_PANEL_CACHE.get("symbols", set()))
+
+
+def _panel_industries() -> list[str]:
+    _load_history_panel(force_refresh=False)
+    return list(HISTORY_PANEL_CACHE.get("industries", []))
+
+
 def _get_sector_registry(force_refresh: bool = False) -> Dict:
     """
     获取行业列表注册表：优先 MiniQMT 动态板块，失败时回退本地池。
@@ -147,6 +230,14 @@ def _get_sector_registry(force_refresh: bool = False) -> Dict:
         sectors = list_dynamic_industry_sectors(limit=1000)
         if sectors:
             source = "miniqmt_dynamic"
+
+    if not sectors:
+        try:
+            sectors = _panel_industries()
+            if sectors:
+                source = "history_panel"
+        except Exception:
+            sectors = []
 
     if not sectors:
         sectors = sorted(LOCAL_SECTOR_SYMBOLS.keys())
@@ -969,8 +1060,575 @@ def _strategy_metrics(daily: pd.DataFrame, prob_series: pd.Series, horizon: int,
     }
 
 
-@app.route("/api/market/backtest")
-def market_backtest():
+# 历史回测统一层：股票池解析 -> 信号生成 -> 非重叠批量执行 -> JSON 序列化
+def _format_bt_date(dt: Any) -> str:
+    return pd.Timestamp(dt).strftime("%Y-%m-%d")
+
+
+def _parse_bt_date(text: str, field_name: str) -> pd.Timestamp:
+    raw = str(text or "").strip()
+    if not raw:
+        raise ValueError(f"{field_name} 不能为空")
+
+    dt = pd.to_datetime(raw, format="%Y%m%d", errors="coerce")
+    if pd.isna(dt):
+        dt = pd.to_datetime(raw, errors="coerce")
+    if pd.isna(dt):
+        raise ValueError(f"{field_name} 格式错误，应为 YYYYMMDD 或 YYYY-MM-DD")
+    return pd.Timestamp(dt).normalize()
+
+
+def _parse_manual_symbols(text: str) -> Tuple[List[str], List[str]]:
+    tokens = [tok for tok in re.split(r"[\s,，;；、]+", str(text or "").strip()) if tok]
+    out: List[str] = []
+    invalid: List[str] = []
+    seen = set()
+    for token in tokens:
+        code = _normalize_plain_symbol(token)
+        if not code:
+            invalid.append(token)
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out, invalid
+
+
+def _symbol_limit_up_rate(symbol: str) -> float:
+    board = _classify_symbol_board(symbol)
+    if board in {"创业板", "科创板"}:
+        return 0.20
+    if board == "北交所":
+        return 0.30
+    return 0.10
+
+
+def _is_limit_up_close(symbol: str, prev_close: Any, close: Any) -> bool:
+    prev_v = _to_float(prev_close, 0.0)
+    close_v = _to_float(close, 0.0)
+    if prev_v <= 0 or close_v <= 0:
+        return False
+    limit_rate = _symbol_limit_up_rate(symbol)
+    return (close_v / prev_v - 1.0) >= (limit_rate - 0.0015)
+
+
+def _row_is_tradeable(row: pd.Series) -> bool:
+    return bool(int(_to_float(row.get("is_trading"), 0.0)) == 1 and pd.notna(row.get("close")) and _to_float(row.get("close"), 0.0) > 0)
+
+
+def _resolve_backtest_universe(universe_mode: str, symbols_text: str, industry: str) -> Dict[str, Any]:
+    panel_symbols = _panel_symbols()
+    panel_industries = set(_panel_industries())
+    warnings: List[str] = []
+
+    if universe_mode == "manual":
+        manual_symbols, invalid_tokens = _parse_manual_symbols(symbols_text)
+        if not manual_symbols:
+            return {"error": "手动股票池不能为空，请输入至少 1 个股票代码。"}
+
+        missing_symbols = [s for s in manual_symbols if s not in panel_symbols]
+        symbols = [s for s in manual_symbols if s in panel_symbols]
+
+        if invalid_tokens:
+            warnings.append(f"已忽略无法识别的代码：{', '.join(invalid_tokens[:8])}")
+        if missing_symbols:
+            warnings.append(f"历史面板中无数据：{', '.join(missing_symbols[:12])}")
+        if not symbols:
+            return {"error": "手动股票池无有效历史数据，请检查输入代码是否正确。"}
+
+        return {
+            "mode": universe_mode,
+            "label": f"{BACKTEST_UNIVERSE_LABELS[universe_mode]}（{len(symbols)}只）",
+            "source": "manual_input",
+            "symbols": symbols,
+            "symbols_preview": symbols[:20],
+            "requested_symbol_count": len(manual_symbols),
+            "resolved_symbol_count": len(symbols),
+            "warnings": warnings,
+        }
+
+    if universe_mode == "main_board":
+        source = "miniqmt_a_share_list"
+        try:
+            listed_symbols = list_a_share_symbols(limit=None)
+        except Exception:
+            listed_symbols = []
+        listed_symbols = [s for s in listed_symbols if _classify_symbol_board(s) == "主板"]
+
+        if not listed_symbols:
+            listed_symbols = sorted([s for s in panel_symbols if _classify_symbol_board(s) == "主板"])
+            source = "history_panel"
+            warnings.append("实时 A 股列表不可用，已回退历史面板主板股票。")
+
+        symbols = [s for s in listed_symbols if s in panel_symbols]
+        if not symbols:
+            return {"error": "主板股票池为空，请确认历史面板或实时股票列表可用。"}
+
+        if len(symbols) < len(listed_symbols):
+            warnings.append(f"已过滤 {len(listed_symbols) - len(symbols)} 只历史面板缺失的主板股票。")
+
+        return {
+            "mode": universe_mode,
+            "label": f"{BACKTEST_UNIVERSE_LABELS[universe_mode]}（{len(symbols)}只）",
+            "source": source,
+            "symbols": symbols,
+            "symbols_preview": symbols[:20],
+            "requested_symbol_count": len(listed_symbols),
+            "resolved_symbol_count": len(symbols),
+            "warnings": warnings,
+        }
+
+    if universe_mode == "industry":
+        picked_industry = str(industry or "").strip()
+        if not picked_industry:
+            return {"error": "行业模式需要选择 industry。"}
+
+        reg = _get_sector_registry(force_refresh=False)
+        available = set(reg.get("sectors", [])) | panel_industries | set(LOCAL_SECTOR_SYMBOLS.keys())
+        source = "history_panel"
+        symbols: List[str] = []
+
+        if reg.get("source") == "miniqmt_dynamic" and picked_industry in set(reg.get("sectors", [])):
+            source = "miniqmt_dynamic"
+            symbols = list_symbols_in_dynamic_sector(picked_industry, limit=None)
+
+        if not symbols and picked_industry in panel_industries:
+            panel = _load_history_panel(force_refresh=False)
+            symbols = sorted(panel.loc[panel["industry"] == picked_industry, "stock_code"].dropna().astype(str).unique().tolist())
+            source = "history_panel"
+
+        if not symbols and picked_industry in LOCAL_SECTOR_SYMBOLS:
+            symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS[picked_industry]]
+            source = "local_fallback"
+
+        symbols = [s for s in symbols if s in panel_symbols]
+        if not symbols:
+            return {
+                "error": f"不支持的行业：{picked_industry}",
+                "available": sorted(available),
+            }
+
+        return {
+            "mode": universe_mode,
+            "label": f"{BACKTEST_UNIVERSE_LABELS[universe_mode]}：{picked_industry}（{len(symbols)}只）",
+            "source": source,
+            "industry": picked_industry,
+            "symbols": symbols,
+            "symbols_preview": symbols[:20],
+            "requested_symbol_count": len(symbols),
+            "resolved_symbol_count": len(symbols),
+            "warnings": warnings,
+        }
+
+    return {"error": f"不支持的 universe_mode: {universe_mode}"}
+
+
+def _prepare_backtest_dataset(symbols: List[str], start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> Dict[str, Any]:
+    panel = _load_history_panel(force_refresh=False)
+    subset = panel[(panel["stock_code"].isin(symbols)) & (panel["date"] <= end_dt)].copy()
+    subset = subset.sort_values(["stock_code", "date"]).reset_index(drop=True)
+
+    # 预先整理逐股历史，后续规则/模型信号都复用这一层。
+    histories: Dict[str, pd.DataFrame] = {}
+    for symbol, one in subset.groupby("stock_code", sort=False):
+        one = one.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+        close_num = pd.to_numeric(one["close"], errors="coerce")
+        prev_close = close_num.shift(1)
+        one["tradeable"] = (one["is_trading"].fillna(0) == 1) & close_num.notna() & (close_num > 0)
+        one["close_prev"] = prev_close
+        one["limit_up"] = [
+            _is_limit_up_close(symbol, prev_close.iloc[i], close_num.iloc[i]) if i > 0 else False
+            for i in range(len(one))
+        ]
+        histories[str(symbol)] = one
+
+    calendar_dates = sorted(pd.Timestamp(x) for x in subset.loc[(subset["date"] >= start_dt) & (subset["date"] <= end_dt), "date"].drop_duplicates().tolist())
+
+    bench_df = subset.copy()
+    bench_df["ret_1d"] = bench_df.groupby("stock_code")["close"].pct_change()
+    bench_df = bench_df[(bench_df["date"] >= start_dt) & (bench_df["date"] <= end_dt)]
+    bench_df = bench_df[(bench_df["is_trading"].fillna(0) == 1) & bench_df["close"].notna() & bench_df["ret_1d"].notna()]
+    daily_ret = bench_df.groupby("date")["ret_1d"].mean().sort_index() if not bench_df.empty else pd.Series(dtype=float)
+    bench_nav = (1.0 + daily_ret.fillna(0.0)).cumprod()
+
+    benchmark_points = [
+        {
+            "date": idx.strftime("%Y-%m-%d"),
+            "date_ts": pd.Timestamp(idx),
+            "equity": round(float(value), 6),
+        }
+        for idx, value in bench_nav.items()
+    ]
+
+    return {
+        "histories": histories,
+        "calendar_dates": calendar_dates,
+        "benchmark_points": benchmark_points,
+        "benchmark_dates": pd.DatetimeIndex([item["date_ts"] for item in benchmark_points]),
+        "benchmark_values": np.array([item["equity"] for item in benchmark_points], dtype=float),
+    }
+
+
+def _history_index_on_or_before(df: pd.DataFrame, target_dt: pd.Timestamp) -> int:
+    if df is None or df.empty:
+        return -1
+    pos = df["date"].searchsorted(pd.Timestamp(target_dt), side="right") - 1
+    return int(pos)
+
+
+def _find_first_tradable_index(df: pd.DataFrame, start_idx: int, avoid_limit_up: bool = False) -> int:
+    idx = max(0, int(start_idx))
+    while idx < len(df):
+        row = df.iloc[idx]
+        if bool(row.get("tradeable", False)):
+            if avoid_limit_up and bool(row.get("limit_up", False)):
+                idx += 1
+                continue
+            return idx
+        idx += 1
+    return -1
+
+
+def _build_position_outcome(symbol: str, df: pd.DataFrame, entry_idx: int, hold_days: int) -> Dict[str, Any] | None:
+    entry_row = df.iloc[entry_idx]
+    if not _row_is_tradeable(entry_row):
+        return None
+
+    exit_idx = _find_first_tradable_index(df, entry_idx + max(1, int(hold_days)), avoid_limit_up=False)
+    if exit_idx < 0:
+        return None
+
+    exit_row = df.iloc[exit_idx]
+    entry_price = _to_float(entry_row.get("close"), 0.0)
+    exit_price = _to_float(exit_row.get("close"), 0.0)
+    if entry_price <= 0 or exit_price <= 0:
+        return None
+
+    return {
+        "symbol": symbol,
+        "industry": str(entry_row.get("industry") or "").strip(),
+        "entry_idx": int(entry_idx),
+        "exit_idx": int(exit_idx),
+        "entry_date_ts": pd.Timestamp(entry_row["date"]),
+        "exit_date_ts": pd.Timestamp(exit_row["date"]),
+        "entry_date": _format_bt_date(entry_row["date"]),
+        "exit_date": _format_bt_date(exit_row["date"]),
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "return": float(exit_price / entry_price - 1.0),
+        "hold_trade_days": int(exit_idx - entry_idx),
+    }
+
+
+def _history_slice_for_model(df: pd.DataFrame, idx: int) -> pd.DataFrame:
+    cols = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
+    return df.iloc[: idx + 1][cols].copy().reset_index(drop=True)
+
+
+def _generate_rule_limit_up_batches(
+    histories: Dict[str, pd.DataFrame],
+    start_dt: pd.Timestamp,
+    end_dt: pd.Timestamp,
+    hold_days: int,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+    for symbol, df in histories.items():
+        if len(df) <= hold_days + 2:
+            continue
+
+        i = 1
+        while i < len(df) - hold_days:
+            row = df.iloc[i]
+            signal_date = pd.Timestamp(row["date"])
+            if signal_date > end_dt:
+                break
+            if signal_date < start_dt or (not bool(row.get("limit_up", False))):
+                i += 1
+                continue
+
+            entry_idx = _find_first_tradable_index(df, i + 1, avoid_limit_up=True)
+            if entry_idx < 0:
+                break
+
+            position = _build_position_outcome(symbol, df, entry_idx, hold_days)
+            if not position:
+                i += 1
+                continue
+            if position["entry_date_ts"] > end_dt or position["exit_date_ts"] > end_dt:
+                i += 1
+                continue
+
+            delay_days = max(0, entry_idx - (i + 1))
+            position["signal_date_ts"] = signal_date
+            position["signal_date"] = _format_bt_date(signal_date)
+            position["score"] = None
+            position["note"] = "T+1 可执行" if delay_days == 0 else f"T+1 仍封板/不可交易，延后 {delay_days} 个交易日"
+            grouped[position["entry_date"]].append(position)
+            i = position["exit_idx"] + 1
+
+    batches: List[Dict[str, Any]] = []
+    for entry_date in sorted(grouped.keys()):
+        positions = sorted(grouped[entry_date], key=lambda item: item["symbol"])
+        batch_exit = max(item["exit_date_ts"] for item in positions)
+        batches.append({
+            "entry_date": entry_date,
+            "entry_date_ts": pd.Timestamp(positions[0]["entry_date_ts"]),
+            "exit_date": _format_bt_date(batch_exit),
+            "exit_date_ts": batch_exit,
+            "positions": positions,
+            "candidate_count": len(positions),
+            "fallback_count": 0,
+            "note": f"{len(positions)} 只股票触发涨停跟随信号",
+        })
+    return batches
+
+
+def _generate_model_topk_batches(
+    histories: Dict[str, pd.DataFrame],
+    calendar_dates: List[pd.Timestamp],
+    end_dt: pd.Timestamp,
+    hold_days: int,
+    top_k: int,
+    backend: str | None,
+    min_history: int,
+) -> List[Dict[str, Any]]:
+    if not calendar_dates:
+        return []
+
+    batches: List[Dict[str, Any]] = []
+    required_history = max(30, int(min_history))
+    rebalance_dates = calendar_dates[:: max(1, int(hold_days))]
+
+    for rebalance_dt in rebalance_dates:
+        history_windows: List[pd.DataFrame] = []
+        candidates: List[Dict[str, Any]] = []
+
+        for symbol, df in histories.items():
+            idx = _history_index_on_or_before(df, rebalance_dt)
+            if idx < required_history - 1:
+                continue
+            if pd.Timestamp(df.iloc[idx]["date"]) != pd.Timestamp(rebalance_dt):
+                continue
+            if not bool(df.iloc[idx].get("tradeable", False)):
+                continue
+
+            position = _build_position_outcome(symbol, df, idx, hold_days)
+            if not position or position["exit_date_ts"] > end_dt:
+                continue
+
+            history_windows.append(_history_slice_for_model(df, idx))
+            candidates.append(position)
+
+        if not history_windows:
+            continue
+
+        preds = predict_probability_batch(history_windows, backend=backend, allow_fallback=True)
+        scored: List[Dict[str, Any]] = []
+        fallback_count = 0
+        for position, pred in zip(candidates, preds):
+            item = dict(position)
+            item["score"] = float(pred.get("p_up_today", 0.5))
+            item["backend"] = pred.get("backend", "rule")
+            item["backend_requested"] = pred.get("backend_requested", backend or "rule")
+            item["backend_fallback"] = bool(pred.get("backend_fallback", False))
+            item["backend_error"] = pred.get("backend_error", "")
+            item["note"] = f"1日上涨概率 {item['score']:.1%}"
+            scored.append(item)
+            if item["backend_fallback"]:
+                fallback_count += 1
+
+        scored = sorted(scored, key=lambda item: (item.get("score", 0.0), item.get("return", -999.0)), reverse=True)
+        picked = scored[: min(int(top_k), len(scored))]
+        if not picked:
+            continue
+
+        batch_exit = max(item["exit_date_ts"] for item in picked)
+        batches.append({
+            "entry_date": _format_bt_date(rebalance_dt),
+            "entry_date_ts": pd.Timestamp(rebalance_dt),
+            "exit_date": _format_bt_date(batch_exit),
+            "exit_date_ts": batch_exit,
+            "positions": picked,
+            "candidate_count": len(scored),
+            "fallback_count": fallback_count,
+            "note": f"候选 {len(scored)} 只，买入 Top {len(picked)}",
+        })
+    return batches
+
+
+def _sample_benchmark_equity(benchmark_dates: pd.DatetimeIndex, benchmark_values: np.ndarray, target_dt: pd.Timestamp) -> float:
+    if benchmark_dates.empty or len(benchmark_values) == 0:
+        return 1.0
+    pos = int(benchmark_dates.searchsorted(pd.Timestamp(target_dt), side="right") - 1)
+    if pos < 0:
+        return 1.0
+    return float(benchmark_values[pos])
+
+
+def _build_equity_curve(
+    executed_batches: List[Dict[str, Any]],
+    benchmark_points: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not benchmark_points:
+        return [
+            {
+                "date": item["exit_date"],
+                "strategy": round(float(item["strategy_equity"]), 6),
+                "benchmark": round(float(item["benchmark_equity"]), 6),
+            }
+            for item in executed_batches
+        ]
+
+    curve: List[Dict[str, Any]] = []
+    batch_idx = 0
+    strategy_equity = 1.0
+    for point in benchmark_points:
+        while batch_idx < len(executed_batches) and executed_batches[batch_idx]["exit_date_ts"] <= point["date_ts"]:
+            strategy_equity = float(executed_batches[batch_idx]["strategy_equity"])
+            batch_idx += 1
+        curve.append({
+            "date": point["date"],
+            "strategy": round(strategy_equity, 6),
+            "benchmark": round(float(point["equity"]), 6),
+        })
+    return curve
+
+
+def _run_non_overlapping_batches(
+    batches: List[Dict[str, Any]],
+    benchmark_points: List[Dict[str, Any]],
+    benchmark_dates: pd.DatetimeIndex,
+    benchmark_values: np.ndarray,
+    start_dt: pd.Timestamp,
+    end_dt: pd.Timestamp,
+) -> Dict[str, Any]:
+    sorted_batches = sorted(batches, key=lambda item: (item["entry_date_ts"], item["exit_date_ts"]))
+
+    executed: List[Dict[str, Any]] = []
+    trade_rows: List[Dict[str, Any]] = []
+    batch_returns: List[float] = []
+    skipped_overlap = 0
+    strategy_equity = 1.0
+    lock_until: pd.Timestamp | None = None
+
+    for batch in sorted_batches:
+        if lock_until is not None and batch["entry_date_ts"] <= lock_until:
+            skipped_overlap += 1
+            continue
+
+        positions = list(batch.get("positions", []))
+        if not positions:
+            continue
+
+        batch_return = float(np.mean([item["return"] for item in positions]))
+        strategy_equity *= (1.0 + batch_return)
+        lock_until = pd.Timestamp(batch["exit_date_ts"])
+        benchmark_equity = _sample_benchmark_equity(benchmark_dates, benchmark_values, batch["exit_date_ts"])
+        symbol_preview = ", ".join([item["symbol"] for item in positions[:6]])
+        if len(positions) > 6:
+            symbol_preview += f" 等{len(positions)}只"
+
+        batch_log = {
+            "entry_date": batch["entry_date"],
+            "entry_date_ts": pd.Timestamp(batch["entry_date_ts"]),
+            "exit_date": batch["exit_date"],
+            "exit_date_ts": pd.Timestamp(batch["exit_date_ts"]),
+            "trade_count": len(positions),
+            "candidate_count": int(batch.get("candidate_count", len(positions))),
+            "hold_days": int(max(item.get("hold_trade_days", 0) for item in positions)),
+            "batch_return": round(batch_return, 6),
+            "strategy_equity": round(strategy_equity, 6),
+            "benchmark_equity": round(benchmark_equity, 6),
+            "fallback_count": int(batch.get("fallback_count", 0)),
+            "symbols": symbol_preview,
+            "note": str(batch.get("note") or ""),
+        }
+        executed.append(batch_log)
+        batch_returns.append(batch_return)
+
+        for position in positions:
+            trade_rows.append({
+                "signal_date": position.get("signal_date", position["entry_date"]),
+                "entry_date": position["entry_date"],
+                "exit_date": position["exit_date"],
+                "symbol": position["symbol"],
+                "industry": position.get("industry", ""),
+                "entry_price": round(float(position["entry_price"]), 4),
+                "exit_price": round(float(position["exit_price"]), 4),
+                "return": round(float(position["return"]), 6),
+                "score": round(float(position["score"]), 4) if position.get("score") is not None else None,
+                "hold_days": int(position.get("hold_trade_days", 0)),
+                "note": str(position.get("note") or ""),
+            })
+
+    final_benchmark = _sample_benchmark_equity(benchmark_dates, benchmark_values, end_dt)
+    if executed:
+        final_strategy = float(executed[-1]["strategy_equity"])
+        curve = _build_equity_curve(executed, benchmark_points)
+    else:
+        final_strategy = 1.0
+        curve = [
+            {
+                "date": point["date"],
+                "strategy": 1.0,
+                "benchmark": round(float(point["equity"]), 6),
+            }
+            for point in benchmark_points
+        ]
+
+    strategy_curve = np.array([point["strategy"] for point in curve], dtype=float) if curve else np.array([1.0], dtype=float)
+    running_max = np.maximum.accumulate(strategy_curve)
+    max_drawdown = float(np.min(strategy_curve / running_max - 1.0)) if len(strategy_curve) else 0.0
+
+    batch_returns_np = np.array(batch_returns, dtype=float)
+    avg_hold_days = float(np.mean([row["hold_days"] for row in executed])) if executed else 0.0
+    annual_factor = np.sqrt(252.0 / max(avg_hold_days, 1.0)) if avg_hold_days else 0.0
+    sharpe = float(batch_returns_np.mean() / batch_returns_np.std() * annual_factor) if len(batch_returns_np) > 1 and batch_returns_np.std() > 1e-12 else 0.0
+    span_days = max(int((end_dt - start_dt).days), 1)
+    annual_return = float((final_strategy ** (365.0 / span_days)) - 1.0) if final_strategy > 0 else -1.0
+
+    recent_trades = sorted(trade_rows, key=lambda item: (item["entry_date"], item["symbol"]), reverse=True)[:40]
+    recent_batches = [
+        {k: v for k, v in row.items() if not k.endswith("_ts")}
+        for row in reversed(executed[-20:])
+    ]
+
+    return {
+        "summary": {
+            "start": _format_bt_date(start_dt),
+            "end": _format_bt_date(end_dt),
+            "calendar_days": span_days,
+            "batch_count": len(executed),
+            "trade_count": len(trade_rows),
+            "skipped_overlap_batches": skipped_overlap,
+            "avg_positions_per_batch": round(float(np.mean([row["trade_count"] for row in executed])), 2) if executed else 0.0,
+            "avg_hold_days": round(avg_hold_days, 2),
+            "strategy_total_return": round(final_strategy - 1.0, 6),
+            "benchmark_total_return": round(final_benchmark - 1.0, 6),
+            "excess_return": round((final_strategy / final_benchmark - 1.0) if final_benchmark > 0 else (final_strategy - 1.0), 6),
+            "annual_return": round(annual_return, 6),
+            "sharpe": round(sharpe, 6),
+            "max_drawdown": round(max_drawdown, 6),
+            "win_rate": round(float((batch_returns_np > 0).mean()), 6) if len(batch_returns_np) else 0.0,
+            "last_strategy_equity": round(final_strategy, 6),
+            "last_benchmark_equity": round(final_benchmark, 6),
+        },
+        "equity_curve": curve,
+        "recent_trades": recent_trades,
+        "batch_log": recent_batches,
+    }
+
+
+def _is_legacy_backtest_request(args) -> bool:
+    new_keys = {"universe_mode", "symbols", "industry", "strategy_category", "rule_preset", "model_preset", "model_backend", "top_k", "hold_days"}
+    if any(args.get(key) is not None for key in new_keys):
+        return False
+    return any(args.get(key) is not None for key in {"symbol", "threshold", "long_horizon", "backend"})
+
+
+def _market_backtest_legacy():
     symbol = (request.args.get("symbol") or "000001").strip()
     start = (request.args.get("start") or "20180101").strip()
     end = (request.args.get("end") or datetime.now().strftime("%Y%m%d")).strip()
@@ -981,71 +1639,191 @@ def market_backtest():
     min_history = max(30, min(int(request.args.get("min_history", "120")), 400))
     long_horizon = max(20, min(int(request.args.get("long_horizon", "60")), 120))
 
+    daily = _daily_from_fetcher(symbol, start, end)
+    if len(daily) < min_history + long_horizon + 10:
+        return jsonify({"error": "历史样本不足，无法回测。请扩大时间区间。"}), 400
+
+    daily = daily.set_index("date")
+
+    eval_indices = list(range(min_history, len(daily) - long_horizon))
+    histories = [daily.iloc[: i + 1].reset_index() for i in eval_indices]
+    preds = predict_probability_batch(histories, backend=backend, allow_fallback=True)
+
+    rows = []
+    for i, pred in zip(eval_indices, preds):
+        close_t = float(daily["close"].iloc[i])
+        ret1 = float(daily["close"].iloc[i + 1] / close_t - 1)
+        ret5 = float(daily["close"].iloc[i + 5] / close_t - 1)
+        retl = float(daily["close"].iloc[i + long_horizon] / close_t - 1)
+
+        rows.append({
+            "date": daily.index[i],
+            "p1": pred["p_up_today"],
+            "p5": pred["p_up_5d"],
+            "pl": pred["p_up_long"],
+            "y1": 1 if ret1 > 0 else 0,
+            "y5": 1 if ret5 > 0 else 0,
+            "yl": 1 if retl > 0 else 0,
+        })
+
+    bt = pd.DataFrame(rows).set_index("date")
+    if bt.empty:
+        return jsonify({"error": "回测结果为空"}), 400
+
+    y1, p1 = bt["y1"].values.astype(int), bt["p1"].values.astype(float)
+    y5, p5 = bt["y5"].values.astype(int), bt["p5"].values.astype(float)
+    yl, pl = bt["yl"].values.astype(int), bt["pl"].values.astype(float)
+
+    m1 = _classification_metrics(y1, p1, threshold=threshold)
+    m5 = _classification_metrics(y5, p5, threshold=threshold)
+    ml = _classification_metrics(yl, pl, threshold=threshold)
+
+    s1 = _strategy_metrics(daily.loc[bt.index], bt["p1"], horizon=1, threshold=threshold)
+    s5 = _strategy_metrics(daily.loc[bt.index], bt["p5"], horizon=5, threshold=threshold)
+    sl = _strategy_metrics(daily.loc[bt.index], bt["pl"], horizon=long_horizon, threshold=threshold)
+
+    return jsonify({
+        "symbol": symbol,
+        "model_backend": get_backend_runtime_status(backend),
+        "window": {"start": start, "end": end, "samples": int(len(bt)), "min_history": min_history, "long_horizon": long_horizon},
+        "classification": {"d1": m1, "d5": m5, "long": ml},
+        "strategy": {"d1": s1, "d5": s5, "long": sl},
+        "calibration": {
+            "d1": _calibration_bins(y1, p1, bins=10),
+            "d5": _calibration_bins(y5, p5, bins=10),
+            "long": _calibration_bins(yl, pl, bins=10),
+        },
+        "preview": [
+            {
+                "date": idx.strftime("%Y-%m-%d"),
+                "p1": round(float(r["p1"]), 4), "y1": int(r["y1"]),
+                "p5": round(float(r["p5"]), 4), "y5": int(r["y5"]),
+                "pl": round(float(r["pl"]), 4), "yl": int(r["yl"]),
+            }
+            for idx, r in bt.tail(80).iterrows()
+        ],
+        "legacy_mode": True,
+    })
+
+
+@app.route("/api/market/backtest")
+def market_backtest():
+    if _is_legacy_backtest_request(request.args):
+        try:
+            return _market_backtest_legacy()
+        except Exception as e:
+            return jsonify({"error": f"回测失败: {str(e)}"}), 500
+
+    universe_mode = (request.args.get("universe_mode") or "manual").strip()
+    symbols_text = request.args.get("symbols") or ""
+    industry = request.args.get("industry") or ""
+    strategy_category = (request.args.get("strategy_category") or "rule").strip()
+    rule_preset = (request.args.get("rule_preset") or "limit_up_follow").strip()
+    model_preset = (request.args.get("model_preset") or "topk_prob_1d").strip()
+    model_backend = (request.args.get("model_backend") or "auto").strip()
+    start_text = request.args.get("start") or "20200101"
+    end_text = request.args.get("end") or datetime.now().strftime("%Y%m%d")
+    hold_days = max(1, min(int(request.args.get("hold_days", "1")), 60))
+    top_k = max(1, min(int(request.args.get("top_k", "5")), 200))
+    min_history = max(30, min(int(request.args.get("min_history", "60")), 240))
+
+    if universe_mode not in BACKTEST_UNIVERSE_LABELS:
+        return jsonify({"error": f"不支持的 universe_mode: {universe_mode}"}), 400
+    if strategy_category not in BACKTEST_STRATEGY_LABELS:
+        return jsonify({"error": f"不支持的 strategy_category: {strategy_category}"}), 400
+    if rule_preset not in BACKTEST_RULE_PRESET_LABELS:
+        return jsonify({"error": f"不支持的 rule_preset: {rule_preset}"}), 400
+    if model_preset not in BACKTEST_MODEL_PRESET_LABELS:
+        return jsonify({"error": f"不支持的 model_preset: {model_preset}"}), 400
+    if model_backend not in BACKTEST_MODEL_BACKEND_LABELS:
+        return jsonify({"error": f"不支持的 model_backend: {model_backend}"}), 400
+
     try:
-        daily = _daily_from_fetcher(symbol, start, end)
-        if len(daily) < min_history + long_horizon + 10:
-            return jsonify({"error": "历史样本不足，无法回测。请扩大时间区间。"}), 400
+        start_dt = _parse_bt_date(start_text, "start")
+        end_dt = _parse_bt_date(end_text, "end")
+        if start_dt >= end_dt:
+            return jsonify({"error": "start 必须早于 end。"}), 400
 
-        daily = daily.set_index("date")
+        universe = _resolve_backtest_universe(universe_mode, symbols_text=symbols_text, industry=industry)
+        if universe.get("error"):
+            status = 400
+            return jsonify(universe), status
 
-        eval_indices = list(range(min_history, len(daily) - long_horizon))
-        histories = [daily.iloc[: i + 1].reset_index() for i in eval_indices]
-        preds = predict_probability_batch(histories, backend=backend, allow_fallback=True)
+        dataset = _prepare_backtest_dataset(universe["symbols"], start_dt=start_dt, end_dt=end_dt)
+        histories = dataset["histories"]
+        if not histories:
+            return jsonify({"error": "所选股票池没有可用于回测的历史数据。"}), 400
 
-        rows = []
-        for i, pred in zip(eval_indices, preds):
-            close_t = float(daily["close"].iloc[i])
-            ret1 = float(daily["close"].iloc[i + 1] / close_t - 1)
-            ret5 = float(daily["close"].iloc[i + 5] / close_t - 1)
-            retl = float(daily["close"].iloc[i + long_horizon] / close_t - 1)
+        if strategy_category == "rule":
+            batches = _generate_rule_limit_up_batches(histories, start_dt=start_dt, end_dt=end_dt, hold_days=hold_days)
+            strategy_info = {
+                "category": strategy_category,
+                "category_label": BACKTEST_STRATEGY_LABELS[strategy_category],
+                "preset": rule_preset,
+                "preset_label": BACKTEST_RULE_PRESET_LABELS[rule_preset],
+                "hold_days": hold_days,
+            }
+        else:
+            batches = _generate_model_topk_batches(
+                histories,
+                calendar_dates=dataset["calendar_dates"],
+                end_dt=end_dt,
+                hold_days=hold_days,
+                top_k=top_k,
+                backend=model_backend,
+                min_history=min_history,
+            )
+            strategy_info = {
+                "category": strategy_category,
+                "category_label": BACKTEST_STRATEGY_LABELS[strategy_category],
+                "preset": model_preset,
+                "preset_label": BACKTEST_MODEL_PRESET_LABELS[model_preset],
+                "hold_days": hold_days,
+                "top_k": top_k,
+                "backend_requested": model_backend,
+                "backend_label": BACKTEST_MODEL_BACKEND_LABELS[model_backend],
+                "backend_status": get_backend_runtime_status(model_backend),
+                "min_history": min_history,
+            }
 
-            rows.append({
-                "date": daily.index[i],
-                "p1": pred["p_up_today"],
-                "p5": pred["p_up_5d"],
-                "pl": pred["p_up_long"],
-                "y1": 1 if ret1 > 0 else 0,
-                "y5": 1 if ret5 > 0 else 0,
-                "yl": 1 if retl > 0 else 0,
-            })
+        run_result = _run_non_overlapping_batches(
+            batches=batches,
+            benchmark_points=dataset["benchmark_points"],
+            benchmark_dates=dataset["benchmark_dates"],
+            benchmark_values=dataset["benchmark_values"],
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
 
-        bt = pd.DataFrame(rows).set_index("date")
-        if bt.empty:
-            return jsonify({"error": "回测结果为空"}), 400
-
-        y1, p1 = bt["y1"].values.astype(int), bt["p1"].values.astype(float)
-        y5, p5 = bt["y5"].values.astype(int), bt["p5"].values.astype(float)
-        yl, pl = bt["yl"].values.astype(int), bt["pl"].values.astype(float)
-
-        m1 = _classification_metrics(y1, p1, threshold=threshold)
-        m5 = _classification_metrics(y5, p5, threshold=threshold)
-        ml = _classification_metrics(yl, pl, threshold=threshold)
-
-        s1 = _strategy_metrics(daily.loc[bt.index], bt["p1"], horizon=1, threshold=threshold)
-        s5 = _strategy_metrics(daily.loc[bt.index], bt["p5"], horizon=5, threshold=threshold)
-        sl = _strategy_metrics(daily.loc[bt.index], bt["pl"], horizon=long_horizon, threshold=threshold)
+        warnings = list(universe.get("warnings", []))
+        if not batches:
+            warnings.append("当前参数下没有产生可执行批次，策略净值保持为 1。")
 
         return jsonify({
-            "symbol": symbol,
-            "model_backend": get_backend_runtime_status(backend),
-            "window": {"start": start, "end": end, "samples": int(len(bt)), "min_history": min_history, "long_horizon": long_horizon},
-            "classification": {"d1": m1, "d5": m5, "long": ml},
-            "strategy": {"d1": s1, "d5": s5, "long": sl},
-            "calibration": {
-                "d1": _calibration_bins(y1, p1, bins=10),
-                "d5": _calibration_bins(y5, p5, bins=10),
-                "long": _calibration_bins(yl, pl, bins=10),
+            "mode": "portfolio_v2",
+            "request": {
+                "start": _format_bt_date(start_dt),
+                "end": _format_bt_date(end_dt),
+                "hold_days": hold_days,
             },
-            "preview": [
-                {
-                    "date": idx.strftime("%Y-%m-%d"),
-                    "p1": round(float(r["p1"]), 4), "y1": int(r["y1"]),
-                    "p5": round(float(r["p5"]), 4), "y5": int(r["y5"]),
-                    "pl": round(float(r["pl"]), 4), "yl": int(r["yl"]),
-                }
-                for idx, r in bt.tail(80).iterrows()
-            ],
+            "universe": {
+                "mode": universe["mode"],
+                "label": universe["label"],
+                "source": universe["source"],
+                "industry": universe.get("industry", ""),
+                "requested_symbol_count": int(universe["requested_symbol_count"]),
+                "resolved_symbol_count": int(universe["resolved_symbol_count"]),
+                "symbols_preview": universe.get("symbols_preview", []),
+            },
+            "strategy": strategy_info,
+            "summary": run_result["summary"],
+            "equity_curve": run_result["equity_curve"],
+            "recent_trades": run_result["recent_trades"],
+            "batch_log": run_result["batch_log"],
+            "warnings": warnings,
         })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"回测失败: {str(e)}"}), 500
 
