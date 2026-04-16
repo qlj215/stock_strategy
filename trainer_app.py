@@ -96,6 +96,10 @@ BACKTEST_MODEL_BACKEND_LABELS = {
     "dl": "dl / 外部深度学习",
     "auto": "auto / 优先 DL，失败回退 rule",
 }
+BACKTEST_DATA_SOURCE_LABELS = {
+    "panel": "本地历史面板",
+    "miniqmt": "MiniQMT",
+}
 
 
 def _today_str():
@@ -1117,30 +1121,38 @@ def _row_is_tradeable(row: pd.Series) -> bool:
     return bool(int(_to_float(row.get("is_trading"), 0.0)) == 1 and pd.notna(row.get("close")) and _to_float(row.get("close"), 0.0) > 0)
 
 
-def _resolve_backtest_universe(universe_mode: str, symbols_text: str, industry: str) -> Dict[str, Any]:
+def _resolve_backtest_universe(universe_mode: str, symbols_text: str, industry: str, data_source: str) -> Dict[str, Any]:
     panel_symbols = _panel_symbols()
     panel_industries = set(_panel_industries())
     warnings: List[str] = []
+    use_panel = data_source == "panel"
 
     if universe_mode == "manual":
         manual_symbols, invalid_tokens = _parse_manual_symbols(symbols_text)
         if not manual_symbols:
             return {"error": "手动股票池不能为空，请输入至少 1 个股票代码。"}
 
-        missing_symbols = [s for s in manual_symbols if s not in panel_symbols]
-        symbols = [s for s in manual_symbols if s in panel_symbols]
-
         if invalid_tokens:
             warnings.append(f"已忽略无法识别的代码：{', '.join(invalid_tokens[:8])}")
-        if missing_symbols:
-            warnings.append(f"历史面板中无数据：{', '.join(missing_symbols[:12])}")
-        if not symbols:
-            return {"error": "手动股票池无有效历史数据，请检查输入代码是否正确。"}
+
+        if use_panel:
+            missing_symbols = [s for s in manual_symbols if s not in panel_symbols]
+            symbols = [s for s in manual_symbols if s in panel_symbols]
+            if missing_symbols:
+                warnings.append(f"历史面板中无数据：{', '.join(missing_symbols[:12])}")
+            if not symbols:
+                return {"error": "手动股票池无有效历史数据，请检查输入代码是否正确，或切换到 MiniQMT 数据源。"}
+        else:
+            symbols = list(manual_symbols)
+            if len(symbols) > 40:
+                warnings.append("MiniQMT 模式会逐只拉取历史数据，手动股票池较大时回测会明显变慢。")
 
         return {
             "mode": universe_mode,
             "label": f"{BACKTEST_UNIVERSE_LABELS[universe_mode]}（{len(symbols)}只）",
             "source": "manual_input",
+            "data_source": data_source,
+            "data_source_label": BACKTEST_DATA_SOURCE_LABELS[data_source],
             "symbols": symbols,
             "symbols_preview": symbols[:20],
             "requested_symbol_count": len(manual_symbols),
@@ -1159,19 +1171,26 @@ def _resolve_backtest_universe(universe_mode: str, symbols_text: str, industry: 
         if not listed_symbols:
             listed_symbols = sorted([s for s in panel_symbols if _classify_symbol_board(s) == "主板"])
             source = "history_panel"
-            warnings.append("实时 A 股列表不可用，已回退历史面板主板股票。")
+            warnings.append("实时 A 股列表不可用，已回退历史面板主板股票池。")
 
-        symbols = [s for s in listed_symbols if s in panel_symbols]
+        if use_panel:
+            symbols = [s for s in listed_symbols if s in panel_symbols]
+            if len(symbols) < len(listed_symbols):
+                warnings.append(f"已过滤 {len(listed_symbols) - len(symbols)} 只历史面板缺失的主板股票。")
+        else:
+            symbols = list(listed_symbols)
+            if len(symbols) > 80:
+                warnings.append("MiniQMT 模式会逐只拉取历史数据，主板全市场回测可能较慢。")
+
         if not symbols:
-            return {"error": "主板股票池为空，请确认历史面板或实时股票列表可用。"}
-
-        if len(symbols) < len(listed_symbols):
-            warnings.append(f"已过滤 {len(listed_symbols) - len(symbols)} 只历史面板缺失的主板股票。")
+            return {"error": "主板股票池为空，请确认所选数据源可用。"}
 
         return {
             "mode": universe_mode,
             "label": f"{BACKTEST_UNIVERSE_LABELS[universe_mode]}（{len(symbols)}只）",
             "source": source,
+            "data_source": data_source,
+            "data_source_label": BACKTEST_DATA_SOURCE_LABELS[data_source],
             "symbols": symbols,
             "symbols_preview": symbols[:20],
             "requested_symbol_count": len(listed_symbols),
@@ -1202,10 +1221,17 @@ def _resolve_backtest_universe(universe_mode: str, symbols_text: str, industry: 
             symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS[picked_industry]]
             source = "local_fallback"
 
-        symbols = [s for s in symbols if s in panel_symbols]
+        if use_panel:
+            filtered_symbols = [s for s in symbols if s in panel_symbols]
+            if len(filtered_symbols) < len(symbols):
+                warnings.append(f"已过滤 {len(symbols) - len(filtered_symbols)} 只历史面板缺失的行业股票。")
+            symbols = filtered_symbols
+        elif len(symbols) > 80:
+            warnings.append("MiniQMT 模式会逐只拉取历史数据，行业股票较多时回测可能较慢。")
+
         if not symbols:
             return {
-                "error": f"不支持的行业：{picked_industry}",
+                "error": f"所选行业在当前数据源下无可用历史数据：{picked_industry}",
                 "available": sorted(available),
             }
 
@@ -1213,6 +1239,8 @@ def _resolve_backtest_universe(universe_mode: str, symbols_text: str, industry: 
             "mode": universe_mode,
             "label": f"{BACKTEST_UNIVERSE_LABELS[universe_mode]}：{picked_industry}（{len(symbols)}只）",
             "source": source,
+            "data_source": data_source,
+            "data_source_label": BACKTEST_DATA_SOURCE_LABELS[data_source],
             "industry": picked_industry,
             "symbols": symbols,
             "symbols_preview": symbols[:20],
@@ -1224,12 +1252,38 @@ def _resolve_backtest_universe(universe_mode: str, symbols_text: str, industry: 
     return {"error": f"不支持的 universe_mode: {universe_mode}"}
 
 
-def _prepare_backtest_dataset(symbols: List[str], start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> Dict[str, Any]:
-    panel = _load_history_panel(force_refresh=False)
-    subset = panel[(panel["stock_code"].isin(symbols)) & (panel["date"] <= end_dt)].copy()
-    subset = subset.sort_values(["stock_code", "date"]).reset_index(drop=True)
+def _finalize_backtest_dataset(
+    subset: pd.DataFrame,
+    start_dt: pd.Timestamp,
+    end_dt: pd.Timestamp,
+    warnings: List[str] | None = None,
+) -> Dict[str, Any]:
+    warnings = list(warnings or [])
+    if subset is None or subset.empty:
+        return {
+            "histories": {},
+            "calendar_dates": [],
+            "benchmark_points": [],
+            "benchmark_dates": pd.DatetimeIndex([]),
+            "benchmark_values": np.array([], dtype=float),
+            "warnings": warnings,
+        }
 
-    # 预先整理逐股历史，后续规则/模型信号都复用这一层。
+    subset = subset.copy()
+    subset["date"] = pd.to_datetime(subset["date"], errors="coerce")
+    subset["stock_code"] = subset["stock_code"].astype(str).map(_normalize_plain_symbol)
+
+    for col in ["open", "high", "low", "close", "volume", "amount", "is_trading"]:
+        if col not in subset.columns:
+            subset[col] = np.nan
+        subset[col] = pd.to_numeric(subset[col], errors="coerce")
+
+    if "industry" not in subset.columns:
+        subset["industry"] = ""
+    subset["industry"] = subset["industry"].fillna("").astype(str).str.strip()
+    subset = subset.dropna(subset=["date"]).sort_values(["stock_code", "date"]).reset_index(drop=True)
+    subset = subset[subset["date"] <= end_dt].copy()
+
     histories: Dict[str, pd.DataFrame] = {}
     for symbol, one in subset.groupby("stock_code", sort=False):
         one = one.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
@@ -1267,7 +1321,103 @@ def _prepare_backtest_dataset(symbols: List[str], start_dt: pd.Timestamp, end_dt
         "benchmark_points": benchmark_points,
         "benchmark_dates": pd.DatetimeIndex([item["date_ts"] for item in benchmark_points]),
         "benchmark_values": np.array([item["equity"] for item in benchmark_points], dtype=float),
+        "warnings": warnings,
     }
+
+
+def _prepare_backtest_dataset_from_panel(symbols: List[str], start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> Dict[str, Any]:
+    panel = _load_history_panel(force_refresh=False)
+    subset = panel[(panel["stock_code"].isin(symbols)) & (panel["date"] <= end_dt)].copy()
+    return _finalize_backtest_dataset(subset, start_dt=start_dt, end_dt=end_dt, warnings=[])
+
+
+def _prepare_backtest_dataset_from_miniqmt(
+    symbols: List[str],
+    start_dt: pd.Timestamp,
+    end_dt: pd.Timestamp,
+    warmup_days: int = 60,
+    industry_hint: str = "",
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    fetch_start_dt = start_dt - timedelta(days=max(45, int(warmup_days) * 2))
+    fetch_start = fetch_start_dt.strftime("%Y%m%d")
+    fetch_end = end_dt.strftime("%Y%m%d")
+
+    industry_map: Dict[str, str] = {}
+    try:
+        panel = _load_history_panel(force_refresh=False)
+        industry_map = (
+            panel[["stock_code", "industry"]]
+            .dropna(subset=["stock_code"])
+            .drop_duplicates(subset=["stock_code"], keep="last")
+            .set_index("stock_code")["industry"]
+            .astype(str)
+            .to_dict()
+        )
+    except Exception:
+        industry_map = {}
+
+    frames: List[pd.DataFrame] = []
+    failed_symbols: List[str] = []
+    empty_symbols: List[str] = []
+
+    for symbol in symbols:
+        try:
+            one = _daily_from_fetcher(symbol, fetch_start, fetch_end)
+        except Exception:
+            failed_symbols.append(symbol)
+            continue
+
+        if one is None or one.empty:
+            empty_symbols.append(symbol)
+            continue
+
+        one = one.copy()
+        one["date"] = pd.to_datetime(one["date"], errors="coerce")
+        one = one.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        if one.empty:
+            empty_symbols.append(symbol)
+            continue
+
+        one["stock_code"] = symbol
+        if "turnover" in one.columns:
+            one["amount"] = pd.to_numeric(one["turnover"], errors="coerce")
+        else:
+            one["amount"] = pd.to_numeric(one.get("close"), errors="coerce") * pd.to_numeric(one.get("volume"), errors="coerce").fillna(0.0)
+        one["is_trading"] = 1
+        one["industry"] = str(industry_hint or industry_map.get(symbol, "")).strip()
+        frames.append(one[["date", "stock_code", "open", "high", "low", "close", "volume", "amount", "is_trading", "industry"]])
+
+    if failed_symbols:
+        preview = ', '.join(failed_symbols[:8])
+        suffix = ' 等' if len(failed_symbols) > 8 else ''
+        warnings.append(f"MiniQMT 历史获取失败：{preview}{suffix}")
+    if empty_symbols:
+        preview = ', '.join(empty_symbols[:8])
+        suffix = ' 等' if len(empty_symbols) > 8 else ''
+        warnings.append(f"MiniQMT 未返回有效历史：{preview}{suffix}")
+
+    subset = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return _finalize_backtest_dataset(subset, start_dt=start_dt, end_dt=end_dt, warnings=warnings)
+
+
+def _prepare_backtest_dataset(
+    symbols: List[str],
+    start_dt: pd.Timestamp,
+    end_dt: pd.Timestamp,
+    data_source: str = "panel",
+    warmup_days: int = 60,
+    industry_hint: str = "",
+) -> Dict[str, Any]:
+    if data_source == "miniqmt":
+        return _prepare_backtest_dataset_from_miniqmt(
+            symbols,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            warmup_days=warmup_days,
+            industry_hint=industry_hint,
+        )
+    return _prepare_backtest_dataset_from_panel(symbols, start_dt=start_dt, end_dt=end_dt)
 
 
 def _history_index_on_or_before(df: pd.DataFrame, target_dt: pd.Timestamp) -> int:
@@ -1721,6 +1871,7 @@ def market_backtest():
     rule_preset = (request.args.get("rule_preset") or "limit_up_follow").strip()
     model_preset = (request.args.get("model_preset") or "topk_prob_1d").strip()
     model_backend = (request.args.get("model_backend") or "auto").strip()
+    data_source = (request.args.get("data_source") or "panel").strip()
     start_text = request.args.get("start") or "20200101"
     end_text = request.args.get("end") or datetime.now().strftime("%Y%m%d")
     hold_days = max(1, min(int(request.args.get("hold_days", "1")), 60))
@@ -1737,6 +1888,8 @@ def market_backtest():
         return jsonify({"error": f"不支持的 model_preset: {model_preset}"}), 400
     if model_backend not in BACKTEST_MODEL_BACKEND_LABELS:
         return jsonify({"error": f"不支持的 model_backend: {model_backend}"}), 400
+    if data_source not in BACKTEST_DATA_SOURCE_LABELS:
+        return jsonify({"error": f"不支持的 data_source: {data_source}"}), 400
 
     try:
         start_dt = _parse_bt_date(start_text, "start")
@@ -1744,15 +1897,25 @@ def market_backtest():
         if start_dt >= end_dt:
             return jsonify({"error": "start 必须早于 end。"}), 400
 
-        universe = _resolve_backtest_universe(universe_mode, symbols_text=symbols_text, industry=industry)
+        universe = _resolve_backtest_universe(universe_mode, symbols_text=symbols_text, industry=industry, data_source=data_source)
         if universe.get("error"):
             status = 400
             return jsonify(universe), status
 
-        dataset = _prepare_backtest_dataset(universe["symbols"], start_dt=start_dt, end_dt=end_dt)
+        warmup_days = max(min_history if strategy_category == "model" else (hold_days + 5), 40)
+        dataset = _prepare_backtest_dataset(
+            universe["symbols"],
+            start_dt=start_dt,
+            end_dt=end_dt,
+            data_source=data_source,
+            warmup_days=warmup_days,
+            industry_hint=industry if universe_mode == "industry" else "",
+        )
         histories = dataset["histories"]
         if not histories:
-            return jsonify({"error": "所选股票池没有可用于回测的历史数据。"}), 400
+            if data_source == "miniqmt":
+                return jsonify({"error": "MiniQMT 未返回可用于回测的历史数据，请确认代码、日期区间和终端行情状态。", "warnings": dataset.get("warnings", [])}), 400
+            return jsonify({"error": "所选股票池没有可用于回测的历史数据。", "warnings": dataset.get("warnings", [])}), 400
 
         if strategy_category == "rule":
             batches = _generate_rule_limit_up_batches(histories, start_dt=start_dt, end_dt=end_dt, hold_days=hold_days)
@@ -1795,7 +1958,7 @@ def market_backtest():
             end_dt=end_dt,
         )
 
-        warnings = list(universe.get("warnings", []))
+        warnings = list(universe.get("warnings", [])) + list(dataset.get("warnings", []))
         if not batches:
             warnings.append("当前参数下没有产生可执行批次，策略净值保持为 1。")
 
@@ -1805,6 +1968,8 @@ def market_backtest():
                 "start": _format_bt_date(start_dt),
                 "end": _format_bt_date(end_dt),
                 "hold_days": hold_days,
+                "data_source": data_source,
+                "data_source_label": BACKTEST_DATA_SOURCE_LABELS[data_source],
             },
             "universe": {
                 "mode": universe["mode"],

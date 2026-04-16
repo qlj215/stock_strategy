@@ -356,6 +356,17 @@
           <select id="btIndustry"></select>
         </div>
       </div>
+
+      <div class="controls" style="margin-top:12px;">
+        <div class="field">
+          <label for="btDataSource">历史数据源</label>
+          <select id="btDataSource" onchange="updateBacktestDataSourceHint()">
+            <option value="panel" selected>本地历史面板</option>
+            <option value="miniqmt">MiniQMT</option>
+          </select>
+        </div>
+      </div>
+      <div id="btDataSourceHint" class="hintBox" style="margin-top:12px;"></div>
     </div>
 
     <div class="controlBlock">
@@ -647,6 +658,17 @@ function setBacktestDefaults(){
   if (!btEnd.value) btEnd.value = todayYmd();
 }
 
+function updateBacktestDataSourceHint(){
+  const source = document.getElementById('btDataSource').value;
+  const hint = document.getElementById('btDataSourceHint');
+  if (!hint) return;
+  if (source === 'miniqmt') {
+    hint.innerHTML = 'MiniQMT：按当前选择的股票池逐只拉取历史数据，手动个股更灵活，但股票池越大回测越慢。';
+    return;
+  }
+  hint.innerHTML = '本地历史面板：回测速度更快，但只能使用 `data/processed/daily_panel.parquet` 已收录的股票历史。';
+}
+
 async function loadOverview(){
   const symbol = document.getElementById('symbol').value.trim();
   const days = document.getElementById('days').value;
@@ -932,12 +954,14 @@ function renderBacktestTrades(d){
 async function runBacktest(){
   const universeMode = document.getElementById('btUniverseMode').value;
   const strategyCategory = document.getElementById('btStrategyCategory').value;
+  const dataSource = document.getElementById('btDataSource').value;
   const start = document.getElementById('btStart').value.trim();
   const end = document.getElementById('btEnd').value.trim();
 
   const params = new URLSearchParams({
     universe_mode: universeMode,
     strategy_category: strategyCategory,
+    data_source: dataSource,
     start,
     end
   });
@@ -986,7 +1010,7 @@ async function runBacktest(){
 
   document.getElementById('btSummary').innerHTML = `
     <div><b>${escapeHtml(d.universe.label)}</b> ｜ <b>${escapeHtml(d.strategy.category_label)}</b> ｜ ${escapeHtml(d.strategy.preset_label)}${backendText}</div>
-    <div class="muted" style="margin-top:6px;">区间：${escapeHtml(d.request.start)} ~ ${escapeHtml(d.request.end)} ｜ 股票数：${d.universe.resolved_symbol_count} ｜ 数据来源：${escapeHtml(d.universe.source)}</div>
+    <div class="muted" style="margin-top:6px;">区间：${escapeHtml(d.request.start)} ~ ${escapeHtml(d.request.end)} ｜ 股票数：${d.universe.resolved_symbol_count} ｜ 历史数据：${escapeHtml(d.request.data_source_label || '-')} ｜ 股票池解析：${escapeHtml(d.universe.source)}</div>
   `;
 
   renderBacktestWarnings(d.warnings || []);
@@ -1033,6 +1057,7 @@ loadSectors();
 toggleScanMode();
 toggleBacktestControls();
 setBacktestDefaults();
+updateBacktestDataSourceHint();
 </script>
 </body>
 </html>
