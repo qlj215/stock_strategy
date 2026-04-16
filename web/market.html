@@ -204,6 +204,8 @@
     td.right, th.right { text-align: right; }
     .positive { color: var(--green); }
     .negative { color: var(--red); }
+    .rise { color: var(--red); }
+    .fall { color: var(--green); }
     pre {
       white-space: pre-wrap;
       background: var(--panel-soft);
@@ -417,7 +419,46 @@
     </div>
 
     <div class="controlBlock">
-      <div class="groupTitle">3. 回测区间</div>
+      <div class="groupTitle">3. 交易成本</div>
+      <div class="row" style="justify-content:space-between;margin-bottom:10px;">
+        <div class="muted">默认按华泰证券 A 股常用费率，可直接改成你自己的券商参数。</div>
+        <button type="button" class="secondary" onclick="resetBacktestCostDefaults()">恢复华泰默认</button>
+      </div>
+      <div class="controls">
+        <div class="field">
+          <label for="btInitialCapital">初始资金（元）</label>
+          <input id="btInitialCapital" type="number" min="10000" step="10000" value="1000000" />
+        </div>
+        <div class="field">
+          <label for="btBuyCommissionRate">买入佣金率</label>
+          <input id="btBuyCommissionRate" type="number" min="0" step="0.00001" value="0.0003" />
+        </div>
+        <div class="field">
+          <label for="btSellCommissionRate">卖出佣金率</label>
+          <input id="btSellCommissionRate" type="number" min="0" step="0.00001" value="0.0003" />
+        </div>
+        <div class="field">
+          <label for="btMinCommission">单笔最低佣金（元）</label>
+          <input id="btMinCommission" type="number" min="0" step="0.1" value="5" />
+        </div>
+        <div class="field">
+          <label for="btSellStampTaxRate">卖出印花税率</label>
+          <input id="btSellStampTaxRate" type="number" min="0" step="0.00001" value="0.0005" />
+        </div>
+        <div class="field">
+          <label for="btTransferFeeRate">单边过户费率</label>
+          <input id="btTransferFeeRate" type="number" min="0" step="0.000001" value="0.00001" />
+        </div>
+        <div class="field">
+          <label for="btSlippageRate">单边滑点率</label>
+          <input id="btSlippageRate" type="number" min="0" step="0.00001" value="0" />
+        </div>
+      </div>
+      <div class="hintBox" style="margin-top:12px;">默认值：双边佣金万 3，单笔最低佣金 5 元，卖出印花税万 5，单边过户费万 0.1，单边滑点默认 0。</div>
+    </div>
+
+    <div class="controlBlock">
+      <div class="groupTitle">4. 回测区间</div>
       <div class="controls">
         <div class="field">
           <label for="btStart">开始日期</label>
@@ -464,23 +505,43 @@
 <script>
 let state = { symbol: '000001', days: 60 };
 let latestScanResponse = null;
+const BACKTEST_COST_DEFAULTS = {
+  btInitialCapital: '1000000',
+  btBuyCommissionRate: '0.0003',
+  btSellCommissionRate: '0.0003',
+  btMinCommission: '5',
+  btSellStampTaxRate: '0.0005',
+  btTransferFeeRate: '0.00001',
+  btSlippageRate: '0'
+};
 
 function pct(v){ return (v * 100).toFixed(1) + '%'; }
 function fmt(n){ return Number(n || 0).toLocaleString(); }
 function fmtProb(v){ return v == null ? '-' : pct(Number(v)); }
+function fmtCurrency(v){
+  if (v == null || Number.isNaN(Number(v))) return '-';
+  return `¥${Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+function fmtRatioPercent(v, digits = 2){
+  if (v == null || Number.isNaN(Number(v))) return '-';
+  return `${(Number(v) * 100).toFixed(digits)}%`;
+}
+function fmtSignedPercentValue(v, digits = 2){
+  if (v == null || Number.isNaN(Number(v))) return '-';
+  return fmtSignedPct(Number(v) / 100, digits);
+}
 function fmtSignedPct(v, digits = 2){
   if (v == null || Number.isNaN(Number(v))) return '-';
   const num = Number(v) * 100;
   const sign = num > 0 ? '+' : '';
-  const cls = num > 0 ? 'positive' : (num < 0 ? 'negative' : '');
+  const cls = num > 0 ? 'rise' : (num < 0 ? 'fall' : '');
   return `<span class="${cls}">${sign}${num.toFixed(digits)}%</span>`;
 }
 function fmtSignedNumber(v, digits = 3){
   if (v == null || Number.isNaN(Number(v))) return '-';
   const num = Number(v);
   const sign = num > 0 ? '+' : '';
-  const cls = num > 0 ? 'positive' : (num < 0 ? 'negative' : '');
-  return `<span class="${cls}">${sign}${num.toFixed(digits)}</span>`;
+  return `${sign}${num.toFixed(digits)}`;
 }
 function escapeHtml(value){
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -653,9 +714,23 @@ function toggleBacktestControls(){
   document.getElementById('btModelWrap').style.display = strategyCategory === 'model' ? 'grid' : 'none';
 }
 
+function applyBacktestCostDefaults(onlyEmpty = false){
+  Object.entries(BACKTEST_COST_DEFAULTS).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (onlyEmpty && String(el.value || '').trim()) return;
+    el.value = value;
+  });
+}
+
+function resetBacktestCostDefaults(){
+  applyBacktestCostDefaults(false);
+}
+
 function setBacktestDefaults(){
   const btEnd = document.getElementById('btEnd');
   if (!btEnd.value) btEnd.value = todayYmd();
+  applyBacktestCostDefaults(true);
 }
 
 function updateBacktestDataSourceHint(){
@@ -681,7 +756,7 @@ async function loadOverview(){
   document.getElementById('metrics').innerHTML = `
     <div class="metric"><small>最新日期</small><b>${escapeHtml(d.latest.date)}</b></div>
     <div class="metric"><small>最新价</small><b>${escapeHtml(d.latest.close)}</b></div>
-    <div class="metric"><small>涨跌幅</small><b>${escapeHtml(d.latest.pct)}%</b></div>
+    <div class="metric"><small>涨跌幅</small><b>${fmtSignedPercentValue(d.latest.pct)}</b></div>
     <div class="metric"><small>成交量</small><b>${fmt(d.latest.volume)}</b></div>
     <div class="metric"><small>成交额</small><b>${fmt(d.latest.turnover)}</b></div>
   `;
@@ -837,7 +912,7 @@ async function runScan(){
               <td>${escapeHtml(r.name || '-')}</td>
               <td>${escapeHtml(r.board || '-')}</td>
               <td class="right">${r.close ?? '-'}</td>
-              <td class="right">${r.pct == null ? '-' : `${r.pct}%`}</td>
+              <td class="right">${fmtSignedPercentValue(r.pct)}</td>
               <td class="right">${fmtProb(r.today_up)}</td>
               <td class="right">${fmtProb(r.next_5d_up)}</td>
               <td class="right">${fmtProb(r.long_up)}</td>
@@ -864,7 +939,9 @@ function renderBacktestMetricCards(d){
   document.getElementById('btMetricCards').innerHTML = `
     <div class="metric"><small>执行批次</small><b>${s.batch_count ?? 0}</b></div>
     <div class="metric"><small>交易笔数</small><b>${s.trade_count ?? 0}</b></div>
-    <div class="metric"><small>策略收益</small><b>${fmtSignedPct(s.strategy_total_return)}</b></div>
+    <div class="metric"><small>净收益</small><b>${fmtSignedPct(s.strategy_total_return)}</b></div>
+    <div class="metric"><small>毛收益</small><b>${fmtSignedPct(s.gross_strategy_total_return)}</b></div>
+    <div class="metric"><small>累计成本</small><b>${fmtCurrency(s.total_cost_amount)}</b></div>
     <div class="metric"><small>股票池基准</small><b>${fmtSignedPct(s.benchmark_total_return)}</b></div>
     <div class="metric"><small>超额收益</small><b>${fmtSignedPct(s.excess_return)}</b></div>
     <div class="metric"><small>最大回撤</small><b>${fmtSignedPct(s.max_drawdown)}</b></div>
@@ -889,7 +966,9 @@ function renderBacktestBatches(d){
             <th>离场</th>
             <th class="right">持仓数</th>
             <th class="right">候选数</th>
-            <th class="right">批次收益</th>
+            <th class="right">毛收益</th>
+            <th class="right">净收益</th>
+            <th class="right">成本</th>
             <th class="right">净值</th>
             <th>摘要</th>
           </tr>
@@ -901,7 +980,9 @@ function renderBacktestBatches(d){
               <td>${escapeHtml(row.exit_date)}</td>
               <td class="right">${row.trade_count}</td>
               <td class="right">${row.candidate_count}</td>
+              <td class="right">${fmtSignedPct(row.gross_batch_return)}</td>
               <td class="right">${fmtSignedPct(row.batch_return)}</td>
+              <td class="right">${fmtRatioPercent(row.cost_return)}</td>
               <td class="right">${Number(row.strategy_equity || 0).toFixed(3)}</td>
               <td>${escapeHtml(row.symbols || '-')}${row.fallback_count ? ` ｜ 回退 ${row.fallback_count}` : ''}</td>
             </tr>
@@ -930,7 +1011,9 @@ function renderBacktestTrades(d){
             <th class="right">分数</th>
             <th>入场</th>
             <th>离场</th>
-            <th class="right">收益</th>
+            <th class="right">毛收益</th>
+            <th class="right">成本</th>
+            <th class="right">净收益</th>
           </tr>
         </thead>
         <tbody>
@@ -942,6 +1025,8 @@ function renderBacktestTrades(d){
               <td class="right">${row.score == null ? '-' : Number(row.score).toFixed(4)}</td>
               <td>${escapeHtml(row.entry_date || '-')}</td>
               <td>${escapeHtml(row.exit_date || '-')}</td>
+              <td class="right">${fmtSignedPct(row.gross_return)}</td>
+              <td class="right">${fmtRatioPercent(row.cost_return)}</td>
               <td class="right">${fmtSignedPct(row.return)}</td>
             </tr>
           `).join('')}
@@ -963,7 +1048,14 @@ async function runBacktest(){
     strategy_category: strategyCategory,
     data_source: dataSource,
     start,
-    end
+    end,
+    initial_capital: document.getElementById('btInitialCapital').value,
+    buy_commission_rate: document.getElementById('btBuyCommissionRate').value,
+    sell_commission_rate: document.getElementById('btSellCommissionRate').value,
+    min_commission: document.getElementById('btMinCommission').value,
+    sell_stamp_tax_rate: document.getElementById('btSellStampTaxRate').value,
+    transfer_fee_rate: document.getElementById('btTransferFeeRate').value,
+    slippage_rate: document.getElementById('btSlippageRate').value
   });
 
   if (universeMode === 'manual') {
@@ -1007,10 +1099,12 @@ async function runBacktest(){
   const backendText = d.strategy?.backend_status
     ? ` ｜ 模型后端：${escapeHtml(d.strategy.backend_label || d.strategy.backend_requested || '')}（实际 ${escapeHtml(d.strategy.backend_status.selected_with_fallback || '-') }）`
     : '';
+  const costCfg = d.request?.transaction_costs || {};
 
   document.getElementById('btSummary').innerHTML = `
     <div><b>${escapeHtml(d.universe.label)}</b> ｜ <b>${escapeHtml(d.strategy.category_label)}</b> ｜ ${escapeHtml(d.strategy.preset_label)}${backendText}</div>
     <div class="muted" style="margin-top:6px;">区间：${escapeHtml(d.request.start)} ~ ${escapeHtml(d.request.end)} ｜ 股票数：${d.universe.resolved_symbol_count} ｜ 历史数据：${escapeHtml(d.request.data_source_label || '-')} ｜ 股票池解析：${escapeHtml(d.universe.source)}</div>
+    <div class="muted" style="margin-top:6px;">交易成本：${escapeHtml(costCfg.preset_label || '自定义')} ｜ 初始资金：${escapeHtml(fmtCurrency(costCfg.initial_capital))}</div>
   `;
 
   renderBacktestWarnings(d.warnings || []);

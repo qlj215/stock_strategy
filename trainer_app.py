@@ -100,6 +100,17 @@ BACKTEST_DATA_SOURCE_LABELS = {
     "panel": "本地历史面板",
     "miniqmt": "MiniQMT",
 }
+BACKTEST_COST_DEFAULTS = {
+    "preset": "huatai_a_share_default",
+    "preset_label": "华泰证券A股默认",
+    "initial_capital": 1000000.0,
+    "buy_commission_rate": 0.0003,
+    "sell_commission_rate": 0.0003,
+    "min_commission": 5.0,
+    "sell_stamp_tax_rate": 0.0005,
+    "transfer_fee_rate": 0.00001,
+    "slippage_rate": 0.0,
+}
 
 
 def _today_str():
@@ -1099,6 +1110,30 @@ def _parse_manual_symbols(text: str) -> Tuple[List[str], List[str]]:
     return out, invalid
 
 
+def _parse_backtest_cost_config(args) -> Dict[str, float]:
+    def _clamp_arg(name: str, default: float, min_value: float, max_value: float) -> float:
+        raw = args.get(name) if args is not None else None
+        value = _to_float(raw if raw not in {None, ""} else default, default)
+        if not np.isfinite(value):
+            value = default
+        return float(max(min_value, min(value, max_value)))
+
+    defaults = dict(BACKTEST_COST_DEFAULTS)
+    cfg = {
+        "initial_capital": _clamp_arg("initial_capital", defaults["initial_capital"], 10000.0, 1e10),
+        "buy_commission_rate": _clamp_arg("buy_commission_rate", defaults["buy_commission_rate"], 0.0, 0.05),
+        "sell_commission_rate": _clamp_arg("sell_commission_rate", defaults["sell_commission_rate"], 0.0, 0.05),
+        "min_commission": _clamp_arg("min_commission", defaults["min_commission"], 0.0, 1000.0),
+        "sell_stamp_tax_rate": _clamp_arg("sell_stamp_tax_rate", defaults["sell_stamp_tax_rate"], 0.0, 0.05),
+        "transfer_fee_rate": _clamp_arg("transfer_fee_rate", defaults["transfer_fee_rate"], 0.0, 0.01),
+        "slippage_rate": _clamp_arg("slippage_rate", defaults["slippage_rate"], 0.0, 0.01),
+    }
+    is_default = all(abs(float(cfg[key]) - float(defaults[key])) < 1e-12 for key in cfg.keys())
+    cfg["preset"] = str(defaults["preset"] if is_default else "custom")
+    cfg["preset_label"] = str(defaults["preset_label"] if is_default else "自定义成本参数")
+    return cfg
+
+
 def _symbol_limit_up_rate(symbol: str) -> float:
     board = _classify_symbol_board(symbol)
     if board in {"创业板", "科创板"}:
@@ -1455,6 +1490,7 @@ def _build_position_outcome(symbol: str, df: pd.DataFrame, entry_idx: int, hold_
     if entry_price <= 0 or exit_price <= 0:
         return None
 
+    gross_return = float(exit_price / entry_price - 1.0)
     return {
         "symbol": symbol,
         "industry": str(entry_row.get("industry") or "").strip(),
@@ -1466,9 +1502,52 @@ def _build_position_outcome(symbol: str, df: pd.DataFrame, entry_idx: int, hold_
         "exit_date": _format_bt_date(exit_row["date"]),
         "entry_price": entry_price,
         "exit_price": exit_price,
-        "return": float(exit_price / entry_price - 1.0),
+        "gross_return": gross_return,
+        "return": gross_return,
         "hold_trade_days": int(exit_idx - entry_idx),
     }
+
+
+def _apply_position_transaction_costs(position: Dict[str, Any], allocated_capital: float, cost_config: Dict[str, Any]) -> Dict[str, Any]:
+    capital = max(_to_float(allocated_capital, 0.0), 1.0)
+    gross_return = _to_float(position.get("gross_return", position.get("return", 0.0)), 0.0)
+    exit_notional = max(capital * (1.0 + gross_return), 0.0)
+
+    buy_commission_rate = _to_float(cost_config.get("buy_commission_rate"), 0.0)
+    sell_commission_rate = _to_float(cost_config.get("sell_commission_rate"), 0.0)
+    min_commission = _to_float(cost_config.get("min_commission"), 0.0)
+    sell_stamp_tax_rate = _to_float(cost_config.get("sell_stamp_tax_rate"), 0.0)
+    transfer_fee_rate = _to_float(cost_config.get("transfer_fee_rate"), 0.0)
+    slippage_rate = _to_float(cost_config.get("slippage_rate"), 0.0)
+
+    buy_commission = max(capital * buy_commission_rate, min_commission) if buy_commission_rate > 0 else 0.0
+    sell_commission = max(exit_notional * sell_commission_rate, min_commission) if sell_commission_rate > 0 else 0.0
+    buy_transfer_fee = capital * transfer_fee_rate
+    sell_transfer_fee = exit_notional * transfer_fee_rate
+    buy_slippage = capital * slippage_rate
+    sell_slippage = exit_notional * slippage_rate
+    sell_stamp_tax = exit_notional * sell_stamp_tax_rate
+
+    total_cost = buy_commission + sell_commission + buy_transfer_fee + sell_transfer_fee + buy_slippage + sell_slippage + sell_stamp_tax
+    net_profit = exit_notional - sell_commission - sell_transfer_fee - sell_slippage - sell_stamp_tax - capital - buy_commission - buy_transfer_fee - buy_slippage
+    net_return = float(net_profit / capital)
+
+    out = dict(position)
+    out.update({
+        "allocated_capital": float(capital),
+        "gross_return": float(gross_return),
+        "return": net_return,
+        "cost_return": float(max(gross_return - net_return, 0.0)),
+        "cost_amount": float(total_cost),
+        "buy_commission": float(buy_commission),
+        "sell_commission": float(sell_commission),
+        "buy_transfer_fee": float(buy_transfer_fee),
+        "sell_transfer_fee": float(sell_transfer_fee),
+        "buy_slippage": float(buy_slippage),
+        "sell_slippage": float(sell_slippage),
+        "sell_stamp_tax": float(sell_stamp_tax),
+    })
+    return out
 
 
 def _history_slice_for_model(df: pd.DataFrame, idx: int) -> pd.DataFrame:
@@ -1653,15 +1732,20 @@ def _run_non_overlapping_batches(
     benchmark_values: np.ndarray,
     start_dt: pd.Timestamp,
     end_dt: pd.Timestamp,
+    cost_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     sorted_batches = sorted(batches, key=lambda item: (item["entry_date_ts"], item["exit_date_ts"]))
+    cost_cfg = dict(BACKTEST_COST_DEFAULTS)
+    cost_cfg.update(cost_config or {})
 
     executed: List[Dict[str, Any]] = []
     trade_rows: List[Dict[str, Any]] = []
     batch_returns: List[float] = []
     skipped_overlap = 0
     strategy_equity = 1.0
+    strategy_gross_equity = 1.0
     lock_until: pd.Timestamp | None = None
+    total_cost_amount = 0.0
 
     for batch in sorted_batches:
         if lock_until is not None and batch["entry_date_ts"] <= lock_until:
@@ -1672,24 +1756,37 @@ def _run_non_overlapping_batches(
         if not positions:
             continue
 
-        batch_return = float(np.mean([item["return"] for item in positions]))
+        allocated_capital = strategy_equity * _to_float(cost_cfg.get("initial_capital"), 1000000.0) / max(len(positions), 1)
+        costed_positions = [_apply_position_transaction_costs(position, allocated_capital, cost_cfg) for position in positions]
+
+        gross_batch_return = float(np.mean([item.get("gross_return", item.get("return", 0.0)) for item in costed_positions]))
+        batch_return = float(np.mean([item["return"] for item in costed_positions]))
+        batch_cost_return = float(np.mean([item.get("cost_return", 0.0) for item in costed_positions]))
+        batch_cost_amount = float(np.sum([item.get("cost_amount", 0.0) for item in costed_positions]))
+
+        strategy_gross_equity *= (1.0 + gross_batch_return)
         strategy_equity *= (1.0 + batch_return)
+        total_cost_amount += batch_cost_amount
         lock_until = pd.Timestamp(batch["exit_date_ts"])
         benchmark_equity = _sample_benchmark_equity(benchmark_dates, benchmark_values, batch["exit_date_ts"])
-        symbol_preview = ", ".join([item["symbol"] for item in positions[:6]])
-        if len(positions) > 6:
-            symbol_preview += f" 等{len(positions)}只"
+        symbol_preview = ", ".join([item["symbol"] for item in costed_positions[:6]])
+        if len(costed_positions) > 6:
+            symbol_preview += f" 等{len(costed_positions)}只"
 
         batch_log = {
             "entry_date": batch["entry_date"],
             "entry_date_ts": pd.Timestamp(batch["entry_date_ts"]),
             "exit_date": batch["exit_date"],
             "exit_date_ts": pd.Timestamp(batch["exit_date_ts"]),
-            "trade_count": len(positions),
-            "candidate_count": int(batch.get("candidate_count", len(positions))),
-            "hold_days": int(max(item.get("hold_trade_days", 0) for item in positions)),
+            "trade_count": len(costed_positions),
+            "candidate_count": int(batch.get("candidate_count", len(costed_positions))),
+            "hold_days": int(max(item.get("hold_trade_days", 0) for item in costed_positions)),
+            "gross_batch_return": round(gross_batch_return, 6),
             "batch_return": round(batch_return, 6),
+            "cost_return": round(batch_cost_return, 6),
+            "cost_amount": round(batch_cost_amount, 2),
             "strategy_equity": round(strategy_equity, 6),
+            "gross_strategy_equity": round(strategy_gross_equity, 6),
             "benchmark_equity": round(benchmark_equity, 6),
             "fallback_count": int(batch.get("fallback_count", 0)),
             "symbols": symbol_preview,
@@ -1698,7 +1795,7 @@ def _run_non_overlapping_batches(
         executed.append(batch_log)
         batch_returns.append(batch_return)
 
-        for position in positions:
+        for position in costed_positions:
             trade_rows.append({
                 "signal_date": position.get("signal_date", position["entry_date"]),
                 "entry_date": position["entry_date"],
@@ -1707,7 +1804,10 @@ def _run_non_overlapping_batches(
                 "industry": position.get("industry", ""),
                 "entry_price": round(float(position["entry_price"]), 4),
                 "exit_price": round(float(position["exit_price"]), 4),
+                "gross_return": round(float(position.get("gross_return", position["return"])), 6),
                 "return": round(float(position["return"]), 6),
+                "cost_return": round(float(position.get("cost_return", 0.0)), 6),
+                "cost_amount": round(float(position.get("cost_amount", 0.0)), 2),
                 "score": round(float(position["score"]), 4) if position.get("score") is not None else None,
                 "hold_days": int(position.get("hold_trade_days", 0)),
                 "note": str(position.get("note") or ""),
@@ -1716,9 +1816,11 @@ def _run_non_overlapping_batches(
     final_benchmark = _sample_benchmark_equity(benchmark_dates, benchmark_values, end_dt)
     if executed:
         final_strategy = float(executed[-1]["strategy_equity"])
+        final_gross_strategy = float(executed[-1]["gross_strategy_equity"])
         curve = _build_equity_curve(executed, benchmark_points)
     else:
         final_strategy = 1.0
+        final_gross_strategy = 1.0
         curve = [
             {
                 "date": point["date"],
@@ -1756,6 +1858,7 @@ def _run_non_overlapping_batches(
             "avg_positions_per_batch": round(float(np.mean([row["trade_count"] for row in executed])), 2) if executed else 0.0,
             "avg_hold_days": round(avg_hold_days, 2),
             "strategy_total_return": round(final_strategy - 1.0, 6),
+            "gross_strategy_total_return": round(final_gross_strategy - 1.0, 6),
             "benchmark_total_return": round(final_benchmark - 1.0, 6),
             "excess_return": round((final_strategy / final_benchmark - 1.0) if final_benchmark > 0 else (final_strategy - 1.0), 6),
             "annual_return": round(annual_return, 6),
@@ -1764,6 +1867,9 @@ def _run_non_overlapping_batches(
             "win_rate": round(float((batch_returns_np > 0).mean()), 6) if len(batch_returns_np) else 0.0,
             "last_strategy_equity": round(final_strategy, 6),
             "last_benchmark_equity": round(final_benchmark, 6),
+            "total_cost_amount": round(float(total_cost_amount), 2),
+            "avg_cost_per_trade": round(float(total_cost_amount / len(trade_rows)), 4) if trade_rows else 0.0,
+            "initial_capital": round(float(cost_cfg.get("initial_capital", 1000000.0)), 2),
         },
         "equity_curve": curve,
         "recent_trades": recent_trades,
@@ -1772,7 +1878,11 @@ def _run_non_overlapping_batches(
 
 
 def _is_legacy_backtest_request(args) -> bool:
-    new_keys = {"universe_mode", "symbols", "industry", "strategy_category", "rule_preset", "model_preset", "model_backend", "top_k", "hold_days"}
+    new_keys = {
+        "universe_mode", "symbols", "industry", "strategy_category", "rule_preset", "model_preset", "model_backend",
+        "top_k", "hold_days", "data_source", "initial_capital", "buy_commission_rate", "sell_commission_rate",
+        "min_commission", "sell_stamp_tax_rate", "transfer_fee_rate", "slippage_rate"
+    }
     if any(args.get(key) is not None for key in new_keys):
         return False
     return any(args.get(key) is not None for key in {"symbol", "threshold", "long_horizon", "backend"})
@@ -1877,6 +1987,7 @@ def market_backtest():
     hold_days = max(1, min(int(request.args.get("hold_days", "1")), 60))
     top_k = max(1, min(int(request.args.get("top_k", "5")), 200))
     min_history = max(30, min(int(request.args.get("min_history", "60")), 240))
+    cost_config = _parse_backtest_cost_config(request.args)
 
     if universe_mode not in BACKTEST_UNIVERSE_LABELS:
         return jsonify({"error": f"不支持的 universe_mode: {universe_mode}"}), 400
@@ -1956,6 +2067,7 @@ def market_backtest():
             benchmark_values=dataset["benchmark_values"],
             start_dt=start_dt,
             end_dt=end_dt,
+            cost_config=cost_config,
         )
 
         warnings = list(universe.get("warnings", [])) + list(dataset.get("warnings", []))
@@ -1970,6 +2082,7 @@ def market_backtest():
                 "hold_days": hold_days,
                 "data_source": data_source,
                 "data_source_label": BACKTEST_DATA_SOURCE_LABELS[data_source],
+                "transaction_costs": cost_config,
             },
             "universe": {
                 "mode": universe["mode"],
