@@ -87,6 +87,10 @@ BACKTEST_STRATEGY_LABELS = {
 }
 BACKTEST_RULE_PRESET_LABELS = {
     "limit_up_follow": "涨停次日跟随",
+    "breakout_20d_high": "20日新高突破",
+    "ma5_cross_ma20": "5日线上穿20日线",
+    "volume_breakout_20d_high": "放量突破20日新高",
+    "oversold_rebound": "超跌反弹",
 }
 BACKTEST_MODEL_PRESET_LABELS = {
     "topk_prob_1d": "1日上涨概率 Top-K 等权",
@@ -1555,25 +1559,122 @@ def _history_slice_for_model(df: pd.DataFrame, idx: int) -> pd.DataFrame:
     return df.iloc[: idx + 1][cols].copy().reset_index(drop=True)
 
 
-def _generate_rule_limit_up_batches(
+def _prepare_rule_indicator_frame(df: pd.DataFrame) -> pd.DataFrame:
+    one = df.copy().sort_values("date").reset_index(drop=True)
+    close = pd.to_numeric(one.get("close"), errors="coerce")
+    high = pd.to_numeric(one.get("high"), errors="coerce")
+    open_ = pd.to_numeric(one.get("open"), errors="coerce")
+    volume = pd.to_numeric(one.get("volume"), errors="coerce")
+
+    one["ret_1d"] = close.pct_change()
+    one["prev_ret_1d"] = one["ret_1d"].shift(1)
+    one["ma5"] = close.rolling(5).mean()
+    one["ma10"] = close.rolling(10).mean()
+    one["ma20"] = close.rolling(20).mean()
+    one["ma5_prev"] = one["ma5"].shift(1)
+    one["ma20_prev"] = one["ma20"].shift(1)
+    one["high20_prev"] = high.shift(1).rolling(20).max()
+    one["volume_ma20_prev"] = volume.shift(1).rolling(20).mean()
+    one["body_ret"] = np.where(open_ > 0, close / open_ - 1.0, np.nan)
+    return one
+
+
+def _rule_signal_limit_up_follow(row: pd.Series) -> bool:
+    return bool(row.get("tradeable", False)) and bool(row.get("limit_up", False))
+
+
+def _rule_signal_breakout_20d_high(row: pd.Series) -> bool:
+    if not bool(row.get("tradeable", False)):
+        return False
+    high20_prev = row.get("high20_prev")
+    ma20 = row.get("ma20")
+    close = _to_float(row.get("close"), 0.0)
+    return pd.notna(high20_prev) and pd.notna(ma20) and close > float(high20_prev) and close > float(ma20)
+
+
+def _rule_signal_ma5_cross_ma20(row: pd.Series) -> bool:
+    if not bool(row.get("tradeable", False)):
+        return False
+    needed = [row.get("ma5_prev"), row.get("ma20_prev"), row.get("ma5"), row.get("ma20")]
+    if any(pd.isna(x) for x in needed):
+        return False
+    close = _to_float(row.get("close"), 0.0)
+    return float(row["ma5_prev"]) <= float(row["ma20_prev"]) and float(row["ma5"]) > float(row["ma20"]) and close > float(row["ma20"])
+
+
+def _rule_signal_volume_breakout_20d_high(row: pd.Series) -> bool:
+    if not _rule_signal_breakout_20d_high(row):
+        return False
+    volume_ma20_prev = row.get("volume_ma20_prev")
+    volume = _to_float(row.get("volume"), 0.0)
+    return pd.notna(volume_ma20_prev) and volume > float(volume_ma20_prev) * 1.5
+
+
+def _rule_signal_oversold_rebound(row: pd.Series) -> bool:
+    if not bool(row.get("tradeable", False)):
+        return False
+    prev_ret = row.get("prev_ret_1d")
+    ret_1d = row.get("ret_1d")
+    body_ret = row.get("body_ret")
+    if pd.isna(prev_ret) or pd.isna(ret_1d) or pd.isna(body_ret):
+        return False
+    return float(prev_ret) <= -0.05 and float(ret_1d) >= 0.02 and float(body_ret) > 0.0
+
+
+def _build_rule_signal_note(rule_preset: str, delay_days: int) -> str:
+    base_map = {
+        "limit_up_follow": "涨停信号后次日跟随",
+        "breakout_20d_high": "收盘价突破前20日高点",
+        "ma5_cross_ma20": "5日均线上穿20日均线",
+        "volume_breakout_20d_high": "放量突破前20日高点",
+        "oversold_rebound": "前一日超跌后当日转强反弹",
+    }
+    base = base_map.get(rule_preset, BACKTEST_RULE_PRESET_LABELS.get(rule_preset, rule_preset))
+    if delay_days <= 0:
+        return f"{base}，T+1 执行"
+    return f"{base}，延后 {delay_days} 个交易日执行"
+
+
+def _generate_rule_batches(
     histories: Dict[str, pd.DataFrame],
     start_dt: pd.Timestamp,
     end_dt: pd.Timestamp,
     hold_days: int,
+    rule_preset: str,
 ) -> List[Dict[str, Any]]:
-    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    signal_map = {
+        "limit_up_follow": _rule_signal_limit_up_follow,
+        "breakout_20d_high": _rule_signal_breakout_20d_high,
+        "ma5_cross_ma20": _rule_signal_ma5_cross_ma20,
+        "volume_breakout_20d_high": _rule_signal_volume_breakout_20d_high,
+        "oversold_rebound": _rule_signal_oversold_rebound,
+    }
+    min_history_map = {
+        "limit_up_follow": 2,
+        "breakout_20d_high": 22,
+        "ma5_cross_ma20": 22,
+        "volume_breakout_20d_high": 22,
+        "oversold_rebound": 3,
+    }
+    signal_fn = signal_map.get(rule_preset)
+    if signal_fn is None:
+        return []
 
-    for symbol, df in histories.items():
-        if len(df) <= hold_days + 2:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    required_rows = max(min_history_map.get(rule_preset, 2), hold_days + 2)
+
+    for symbol, raw_df in histories.items():
+        if len(raw_df) <= required_rows:
             continue
 
+        df = _prepare_rule_indicator_frame(raw_df)
         i = 1
         while i < len(df) - hold_days:
             row = df.iloc[i]
             signal_date = pd.Timestamp(row["date"])
             if signal_date > end_dt:
                 break
-            if signal_date < start_dt or (not bool(row.get("limit_up", False))):
+            if signal_date < start_dt or (not signal_fn(row)):
                 i += 1
                 continue
 
@@ -1593,11 +1694,12 @@ def _generate_rule_limit_up_batches(
             position["signal_date_ts"] = signal_date
             position["signal_date"] = _format_bt_date(signal_date)
             position["score"] = None
-            position["note"] = "T+1 可执行" if delay_days == 0 else f"T+1 仍封板/不可交易，延后 {delay_days} 个交易日"
+            position["note"] = _build_rule_signal_note(rule_preset, delay_days)
             grouped[position["entry_date"]].append(position)
             i = position["exit_idx"] + 1
 
     batches: List[Dict[str, Any]] = []
+    strategy_label = BACKTEST_RULE_PRESET_LABELS.get(rule_preset, rule_preset)
     for entry_date in sorted(grouped.keys()):
         positions = sorted(grouped[entry_date], key=lambda item: item["symbol"])
         batch_exit = max(item["exit_date_ts"] for item in positions)
@@ -1609,7 +1711,7 @@ def _generate_rule_limit_up_batches(
             "positions": positions,
             "candidate_count": len(positions),
             "fallback_count": 0,
-            "note": f"{len(positions)} 只股票触发涨停跟随信号",
+            "note": f"{len(positions)} 只股票触发{strategy_label}信号",
         })
     return batches
 
@@ -2029,7 +2131,13 @@ def market_backtest():
             return jsonify({"error": "所选股票池没有可用于回测的历史数据。", "warnings": dataset.get("warnings", [])}), 400
 
         if strategy_category == "rule":
-            batches = _generate_rule_limit_up_batches(histories, start_dt=start_dt, end_dt=end_dt, hold_days=hold_days)
+            batches = _generate_rule_batches(
+                histories,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                hold_days=hold_days,
+                rule_preset=rule_preset,
+            )
             strategy_info = {
                 "category": strategy_category,
                 "category_label": BACKTEST_STRATEGY_LABELS[strategy_category],
