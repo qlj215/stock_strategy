@@ -1943,10 +1943,10 @@ def _run_non_overlapping_batches(
     span_days = max(int((end_dt - start_dt).days), 1)
     annual_return = float((final_strategy ** (365.0 / span_days)) - 1.0) if final_strategy > 0 else -1.0
 
-    recent_trades = sorted(trade_rows, key=lambda item: (item["entry_date"], item["symbol"]), reverse=True)[:40]
+    recent_trades = sorted(trade_rows, key=lambda item: (item["entry_date"], item["symbol"]), reverse=True)
     recent_batches = [
         {k: v for k, v in row.items() if not k.endswith("_ts")}
-        for row in reversed(executed[-20:])
+        for row in reversed(executed)
     ]
 
     return {

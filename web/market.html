@@ -485,11 +485,17 @@
 
     <div class="splitCols">
       <div class="subCard">
-        <h4>最近批次</h4>
+        <div class="sectionHead" style="margin-bottom:10px;">
+          <h4 style="margin:0;">最近批次</h4>
+          <button id="btBatchesToggle" type="button" class="secondary" style="display:none;padding:6px 10px;" onclick="toggleBacktestBatchesExpanded()">展开</button>
+        </div>
         <div id="btBatches" class="muted">等待回测...</div>
       </div>
       <div class="subCard">
-        <h4>最近交易</h4>
+        <div class="sectionHead" style="margin-bottom:10px;">
+          <h4 style="margin:0;">最近交易</h4>
+          <button id="btTradesToggle" type="button" class="secondary" style="display:none;padding:6px 10px;" onclick="toggleBacktestTradesExpanded()">展开</button>
+        </div>
         <div id="btTrades" class="muted">等待回测...</div>
       </div>
     </div>
@@ -509,6 +515,9 @@
 <script>
 let state = { symbol: '000001', days: 60 };
 let latestScanResponse = null;
+let latestBacktestResponse = null;
+const BACKTEST_PREVIEW_LIMIT = 20;
+const backtestExpandState = { batches: false, trades: false };
 const BACKTEST_COST_DEFAULTS = {
   btInitialCapital: '1000000',
   btBuyCommissionRate: '0.0003',
@@ -954,13 +963,29 @@ function renderBacktestMetricCards(d){
   `;
 }
 
+function toggleBacktestBatchesExpanded(){
+  backtestExpandState.batches = !backtestExpandState.batches;
+  if (latestBacktestResponse) renderBacktestBatches(latestBacktestResponse);
+}
+
+function toggleBacktestTradesExpanded(){
+  backtestExpandState.trades = !backtestExpandState.trades;
+  if (latestBacktestResponse) renderBacktestTrades(latestBacktestResponse);
+}
+
 function renderBacktestBatches(d){
   const rows = d.batch_log || [];
   const target = document.getElementById('btBatches');
+  const toggle = document.getElementById('btBatchesToggle');
+  if (toggle) {
+    toggle.style.display = rows.length > BACKTEST_PREVIEW_LIMIT ? 'inline-flex' : 'none';
+    toggle.textContent = backtestExpandState.batches ? '收起' : '展开';
+  }
   if (!rows.length) {
     target.innerHTML = '<div class="muted">没有可展示的批次。</div>';
     return;
   }
+  const visibleRows = backtestExpandState.batches ? rows : rows.slice(0, BACKTEST_PREVIEW_LIMIT);
   target.innerHTML = `
     <div class="tableWrap">
       <table>
@@ -978,7 +1003,7 @@ function renderBacktestBatches(d){
           </tr>
         </thead>
         <tbody>
-          ${rows.map(row => `
+          ${visibleRows.map(row => `
             <tr>
               <td>${escapeHtml(row.entry_date)}</td>
               <td>${escapeHtml(row.exit_date)}</td>
@@ -994,16 +1019,23 @@ function renderBacktestBatches(d){
         </tbody>
       </table>
     </div>
+    ${rows.length > BACKTEST_PREVIEW_LIMIT ? `<div class="muted" style="margin-top:8px;">当前显示 ${visibleRows.length} / ${rows.length} 条批次</div>` : ''}
   `;
 }
 
 function renderBacktestTrades(d){
   const rows = d.recent_trades || [];
   const target = document.getElementById('btTrades');
+  const toggle = document.getElementById('btTradesToggle');
+  if (toggle) {
+    toggle.style.display = rows.length > BACKTEST_PREVIEW_LIMIT ? 'inline-flex' : 'none';
+    toggle.textContent = backtestExpandState.trades ? '收起' : '展开';
+  }
   if (!rows.length) {
     target.innerHTML = '<div class="muted">没有可展示的交易。</div>';
     return;
   }
+  const visibleRows = backtestExpandState.trades ? rows : rows.slice(0, BACKTEST_PREVIEW_LIMIT);
   target.innerHTML = `
     <div class="tableWrap">
       <table>
@@ -1021,7 +1053,7 @@ function renderBacktestTrades(d){
           </tr>
         </thead>
         <tbody>
-          ${rows.map(row => `
+          ${visibleRows.map(row => `
             <tr>
               <td>${escapeHtml(row.signal_date || '-')}</td>
               <td>${escapeHtml(row.symbol || '')}</td>
@@ -1037,6 +1069,7 @@ function renderBacktestTrades(d){
         </tbody>
       </table>
     </div>
+    ${rows.length > BACKTEST_PREVIEW_LIMIT ? `<div class="muted" style="margin-top:8px;">当前显示 ${visibleRows.length} / ${rows.length} 条交易</div>` : ''}
   `;
 }
 
@@ -1084,11 +1117,18 @@ async function runBacktest(){
     params.set('hold_days', document.getElementById('btModelHoldDays').value);
   }
 
+  latestBacktestResponse = null;
+  backtestExpandState.batches = false;
+  backtestExpandState.trades = false;
   document.getElementById('btSummary').innerText = '回测运行中，请稍候...';
   renderBacktestWarnings([]);
   document.getElementById('btMetricCards').innerHTML = '';
   document.getElementById('btBatches').innerHTML = '<div class="muted">正在生成批次...</div>';
   document.getElementById('btTrades').innerHTML = '<div class="muted">正在生成交易...</div>';
+  const btBatchesToggle = document.getElementById('btBatchesToggle');
+  const btTradesToggle = document.getElementById('btTradesToggle');
+  if (btBatchesToggle) btBatchesToggle.style.display = 'none';
+  if (btTradesToggle) btTradesToggle.style.display = 'none';
 
   const r = await fetch('/api/market/backtest?' + params.toString());
   const d = await r.json();
@@ -1099,6 +1139,8 @@ async function runBacktest(){
     Plotly.purge('btChart');
     return;
   }
+
+  latestBacktestResponse = d;
 
   const backendText = d.strategy?.backend_status
     ? ` ｜ 模型后端：${escapeHtml(d.strategy.backend_label || d.strategy.backend_requested || '')}（实际 ${escapeHtml(d.strategy.backend_status.selected_with_fallback || '-') }）`
