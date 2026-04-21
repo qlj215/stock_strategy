@@ -1085,24 +1085,38 @@ async function pollScanJob(jobId){
     }
 
     const pct = Math.max(0, Math.min(100, Math.round(Number(d.progress || 0) * 100)));
+    const statusText = d.status === 'done' ? '结果整理完成，正在加载表格...' : (d.status || '-');
     document.getElementById('scanResult').innerHTML = `
       <div class="progressBox">
         <div class="statusStrip">
-          <span>状态：${escapeHtml(d.status || '-')}</span>
+          <span>状态：${escapeHtml(statusText)}</span>
           <span>进度：${pct}%</span>
           <span>已完成：${d.completed || 0} / ${d.requested || 0}</span>
           <span>成功：${d.success || 0}</span>
           <span>失败：${d.failed || 0}</span>
         </div>
-        <div class="muted" style="margin-top:8px;">当前处理：${escapeHtml(d.current_symbol || '准备中...')}</div>
+        <div class="muted" style="margin-top:8px;">当前处理：${escapeHtml(d.current_symbol || (d.status === 'done' ? '结果加载中...' : '准备中...'))}</div>
         <div class="progressBar"><div class="progressFill" style="width:${pct}%;"></div></div>
       </div>
     `;
 
     if (d.status === 'done') {
-      latestScanJobId = null;
-      renderScanResult(d.result || {});
-      return;
+      try {
+        const rr = await fetch(`/api/market/scan/${encodeURIComponent(jobId)}/result`);
+        const result = await rr.json();
+        if (result.error) {
+          document.getElementById('scanResult').innerText = '结果加载失败：' + result.error;
+          latestScanJobId = null;
+          return;
+        }
+        latestScanJobId = null;
+        renderScanResult(result || {});
+        return;
+      } catch (err) {
+        document.getElementById('scanResult').innerText = '结果加载失败：' + (err?.message || 'unknown');
+        latestScanJobId = null;
+        return;
+      }
     }
     if (d.status === 'error') {
       latestScanJobId = null;

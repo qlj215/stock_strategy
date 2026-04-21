@@ -1048,7 +1048,7 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
         if job_id and job_id in SCAN_JOBS:
             SCAN_JOBS[job_id].update({
                 "status": "running",
-                "progress": round(idx / max(total, 1), 4),
+                "progress": round(min((idx - 1) / max(total, 1), 0.99), 4),
                 "completed": idx - 1,
                 "requested": total,
                 "current_symbol": s,
@@ -1078,7 +1078,7 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
                 "completed": idx,
                 "success": len(rows),
                 "failed": len(failed),
-                "progress": round(idx / max(total, 1), 4),
+                "progress": round(min(idx / max(total, 1), 0.99), 4),
             })
 
     rows = sorted(rows, key=lambda x: x.get(sort_by, 0), reverse=True)
@@ -1176,6 +1176,7 @@ def market_scan():
                 "current_symbol": "",
                 "created_at": datetime.now().isoformat(),
                 "params": params,
+                "result": None,
             }
             t = threading.Thread(target=_run_scan_job, args=(job_id, params), daemon=True)
             t.start()
@@ -1193,7 +1194,27 @@ def market_scan():
 def market_scan_status(job_id: str):
     if job_id not in SCAN_JOBS:
         return jsonify({"error": "任务不存在"}), 404
-    return jsonify(SCAN_JOBS[job_id])
+    job = dict(SCAN_JOBS[job_id])
+    result = job.pop("result", None)
+    job["has_result"] = bool(isinstance(result, dict))
+    if isinstance(result, dict):
+        job["result_summary"] = {
+            "requested": result.get("requested", 0),
+            "success": result.get("success", 0),
+            "failed": result.get("failed", 0),
+            "scan_time": result.get("scan_time", ""),
+        }
+    return jsonify(job)
+
+
+@app.route("/api/market/scan/<job_id>/result")
+def market_scan_result(job_id: str):
+    if job_id not in SCAN_JOBS:
+        return jsonify({"error": "任务不存在"}), 404
+    job = SCAN_JOBS[job_id]
+    if job.get("status") != "done" or not isinstance(job.get("result"), dict):
+        return jsonify({"error": "结果尚未就绪"}), 409
+    return jsonify(job["result"])
 
 
 def _safe_div(a: float, b: float) -> float:
