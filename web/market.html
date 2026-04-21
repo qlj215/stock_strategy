@@ -300,10 +300,16 @@
       </div>
       <div class="field" id="scanCandidateModeWrap" style="display:none;">
         <label for="scanCandidateMode">全市场候选生成</label>
-        <select id="scanCandidateMode">
+        <select id="scanCandidateMode" onchange="toggleScanMode()">
           <option value="turnover_priority" selected>按成交额优先</option>
           <option value="full_order">不按成交额优先</option>
+          <option value="random_sample">随机抽样遍历</option>
+          <option value="full_universe">全样本全量计算</option>
         </select>
+      </div>
+      <div class="field" id="scanRandomSeedWrap" style="display:none;">
+        <label for="scanRandomSeed">随机种子</label>
+        <input id="scanRandomSeed" type="number" value="42" min="0" step="1" />
       </div>
       <div class="field">
         <label for="scanBoardFilter">板块筛选</label>
@@ -827,8 +833,10 @@ function setSegment(groupId, inputId, value){
 
 function toggleScanMode(){
   const mode = document.getElementById('scanMode').value;
+  const candidateMode = document.getElementById('scanCandidateMode')?.value || 'turnover_priority';
   document.getElementById('industryWrap').style.display = mode === 'industry' ? 'block' : 'none';
   document.getElementById('scanCandidateModeWrap').style.display = mode === 'all' ? 'block' : 'none';
+  document.getElementById('scanRandomSeedWrap').style.display = (mode === 'all' && candidateMode === 'random_sample') ? 'block' : 'none';
 }
 
 function toggleBacktestControls(){
@@ -994,15 +1002,21 @@ async function runScan(){
   const industry = document.getElementById('industry').value;
   const boardFilter = document.getElementById('scanBoardFilter').value;
   const candidateMode = document.getElementById('scanCandidateMode').value;
+  const randomSeed = document.getElementById('scanRandomSeed').value;
   const limit = document.getElementById('scanLimit').value;
   const sortBy = document.getElementById('scanSortBy').value;
   const days = document.getElementById('days').value;
 
   const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days, board_filter: boardFilter });
-  if (mode === 'all') params.set('candidate_mode', candidateMode);
+  if (mode === 'all') {
+    params.set('candidate_mode', candidateMode);
+    if (candidateMode === 'random_sample') params.set('random_seed', randomSeed || '42');
+  }
   if (mode === 'industry') params.set('industry', industry);
 
-  document.getElementById('scanResult').innerHTML = '扫描中，请稍候（样本越大越慢）...';
+  document.getElementById('scanResult').innerHTML = candidateMode === 'full_universe'
+    ? '正在做全样本全量计算，请耐心等一下，这会明显更慢...'
+    : '扫描中，请稍候（样本越大越慢）...';
 
   const r = await fetch('/api/market/scan?' + params.toString());
   const d = await r.json();
@@ -1023,6 +1037,7 @@ async function runScan(){
       <span>范围：${escapeHtml(d.industry)}</span>
       <span>板块筛选：${escapeHtml(d.board_filter_label || '全部')}</span>
       ${d.mode === 'all' ? `<span>候选生成：${escapeHtml(d.candidate_mode_label || d.candidate_mode || '-')}</span>` : ''}
+      ${d.mode === 'all' && d.candidate_mode === 'random_sample' ? `<span>随机种子：${escapeHtml(d.random_seed ?? '-')}</span>` : ''}
       <span>排序：${escapeHtml(d.sort_by_label || d.sort_by || '')}</span>
       <span>时间：${escapeHtml(d.scan_time || '-')}</span>
     </div>

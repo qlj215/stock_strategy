@@ -69,6 +69,8 @@ SCAN_SORT_LABELS = {
 SCAN_CANDIDATE_MODE_LABELS = {
     "turnover_priority": "按成交额优先",
     "full_order": "不按成交额优先",
+    "random_sample": "随机抽样遍历",
+    "full_universe": "全样本全量计算",
 }
 BOARD_FILTER_LABELS = {
     "all": "全部",
@@ -964,6 +966,7 @@ def market_scan():
     limit = max(1, min(int(request.args.get("limit", "30")), 400))
     backend = (request.args.get("backend") or "").strip() or None
     candidate_mode = (request.args.get("candidate_mode") or "turnover_priority").strip()
+    random_seed = int(request.args.get("random_seed", "42") or 42)
 
     allowed_sort = {"today_up", "next_5d_up", "long_up", "pct", "turnover"}
     if sort_by not in allowed_sort:
@@ -1050,6 +1053,14 @@ def market_scan():
                     reverse=True,
                 )
                 symbols = [code for code, _ in ranked[:limit]]
+            elif candidate_mode == "random_sample":
+                rng = random.Random(random_seed)
+                if len(all_symbols) <= limit:
+                    symbols = list(all_symbols)
+                else:
+                    symbols = rng.sample(list(all_symbols), limit)
+            elif candidate_mode == "full_universe":
+                symbols = list(all_symbols)
             else:
                 symbols = list(all_symbols[:limit])
             names_map = {s: get_symbol_name(s) for s in symbols}
@@ -1084,6 +1095,8 @@ def market_scan():
                 failed.append(s)
 
         rows = sorted(rows, key=lambda x: x.get(sort_by, 0), reverse=True)
+        if candidate_mode != "full_universe":
+            rows = rows[:limit]
 
         return jsonify({
             "mode": mode,
@@ -1096,6 +1109,7 @@ def market_scan():
             "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
             "candidate_mode": candidate_mode,
             "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
+            "random_seed": random_seed if candidate_mode == "random_sample" else None,
             "board_filter": board_filter,
             "board_filter_label": BOARD_FILTER_LABELS[board_filter],
             "filtered_universe": filtered_universe or len(symbols),
