@@ -92,6 +92,7 @@ BACKTEST_RULE_PRESET_LABELS = {
     "volume_breakout_20d_high": "放量突破20日新高",
     "oversold_rebound": "超跌反弹",
 }
+REALTIME_SIGNAL_PRESET_LABELS = dict(BACKTEST_RULE_PRESET_LABELS)
 BACKTEST_MODEL_PRESET_LABELS = {
     "topk_prob_1d": "1日上涨概率 Top-K 等权",
 }
@@ -332,6 +333,102 @@ def _intraday_from_fetcher(symbol: str, count: int = 240) -> pd.DataFrame:
         return out[["dt", "price", "volume", "avg"]].copy()
     except Exception:
         return pd.DataFrame(columns=["dt", "price", "volume", "avg"])
+
+
+def _intraday_completion_ratio(intraday_df: pd.DataFrame) -> float:
+    if intraday_df is None or intraday_df.empty or "dt" not in intraday_df.columns:
+        return 1.0
+
+    times = pd.to_datetime(intraday_df["dt"], errors="coerce").dropna()
+    if times.empty:
+        return 1.0
+
+    latest = pd.Timestamp(times.max())
+    minute_of_day = latest.hour * 60 + latest.minute
+
+    if minute_of_day <= 9 * 60 + 30:
+        traded_minutes = 1
+    elif minute_of_day < 11 * 60 + 30:
+        traded_minutes = minute_of_day - (9 * 60 + 30) + 1
+    elif minute_of_day < 13 * 60:
+        traded_minutes = 120
+    elif minute_of_day <= 15 * 60:
+        traded_minutes = 120 + (minute_of_day - 13 * 60) + 1
+    else:
+        traded_minutes = 240
+
+    traded_minutes = max(1, min(int(traded_minutes), 240))
+    return float(traded_minutes / 240.0)
+
+
+def _merge_today_estimated_bar(daily_df: pd.DataFrame, intraday_df: pd.DataFrame) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    daily = daily_df.copy()
+    meta = {
+        "applied": False,
+        "date": "",
+        "completion_ratio": 1.0,
+        "estimated_volume": None,
+        "estimated_turnover": None,
+        "raw_volume": None,
+        "raw_turnover": None,
+        "latest_price": None,
+    }
+
+    if intraday_df is None or intraday_df.empty or daily.empty:
+        return daily, meta
+
+    intra = intraday_df.copy()
+    intra["dt"] = pd.to_datetime(intra["dt"], errors="coerce")
+    intra = intra.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
+    if intra.empty:
+        return daily, meta
+
+    trade_date = pd.Timestamp(intra["dt"].iloc[-1]).normalize()
+    today_key = trade_date.strftime("%Y-%m-%d")
+    if str(daily.iloc[-1]["date"].strftime("%Y-%m-%d")) != today_key:
+        return daily, meta
+
+    ratio = _intraday_completion_ratio(intra)
+    if ratio <= 0:
+        ratio = 1.0
+
+    raw_volume = float(pd.to_numeric(intra.get("volume"), errors="coerce").fillna(0.0).sum())
+    prices = pd.to_numeric(intra.get("price"), errors="coerce")
+    vols = pd.to_numeric(intra.get("volume"), errors="coerce").fillna(0.0)
+    raw_turnover = float((prices.fillna(method="ffill").fillna(0.0) * vols).sum())
+    latest_price = float(prices.dropna().iloc[-1]) if prices.dropna().shape[0] else None
+    day_high = float(prices.max()) if prices.notna().any() else None
+    day_low = float(prices.min()) if prices.notna().any() else None
+    day_open = float(prices.dropna().iloc[0]) if prices.dropna().shape[0] else None
+
+    est_volume = raw_volume / ratio if ratio > 0 else raw_volume
+    est_turnover = raw_turnover / ratio if ratio > 0 else raw_turnover
+
+    idx = daily.index[-1]
+    if day_open and day_open > 0:
+        daily.at[idx, "open"] = day_open
+    if day_high and day_high > 0:
+        daily.at[idx, "high"] = day_high
+    if day_low and day_low > 0:
+        daily.at[idx, "low"] = day_low
+    if latest_price and latest_price > 0:
+        daily.at[idx, "close"] = latest_price
+    daily.at[idx, "volume"] = est_volume
+    if "turnover" in daily.columns:
+        daily.at[idx, "turnover"] = est_turnover
+    daily["pct"] = daily["close"].pct_change() * 100
+
+    meta.update({
+        "applied": True,
+        "date": today_key,
+        "completion_ratio": float(ratio),
+        "estimated_volume": float(est_volume),
+        "estimated_turnover": float(est_turnover),
+        "raw_volume": float(raw_volume),
+        "raw_turnover": float(raw_turnover),
+        "latest_price": latest_price,
+    })
+    return daily, meta
 
 
 def _fetch_event_context(symbol: str, anchor_date: str, max_items: int = 5, lookback_days: int = 45):
@@ -673,8 +770,10 @@ def market_overview():
         daily = _daily_from_fetcher(symbol, start, end).tail(days)
         if daily.empty:
             return jsonify({"error": "未获取到日线数据"}), 400
+        daily["symbol"] = symbol
 
         intraday = _intraday_from_fetcher(symbol, count=240)
+        daily, intraday_estimation = _merge_today_estimated_bar(daily, intraday)
 
         model_result = _probability_model(daily, backend=backend)
         latest = daily.iloc[-1]
@@ -720,9 +819,49 @@ def market_overview():
                 "backend_fallback": bool(model_result.get("backend_fallback", False)),
                 "backend_error": model_result.get("backend_error", ""),
             },
+            "intraday_estimation": intraday_estimation,
+            "signal_presets": [
+                {"value": key, "label": label}
+                for key, label in REALTIME_SIGNAL_PRESET_LABELS.items()
+            ],
         })
     except Exception as e:
         return jsonify({"error": f"数据获取失败: {str(e)}"}), 500
+
+
+@app.route("/api/market/signals")
+def market_signals():
+    symbol = (request.args.get("symbol") or "000001").strip()
+    days = int(request.args.get("days", "60"))
+    days = max(20, min(days, 250))
+    signal_preset = (request.args.get("signal_preset") or "limit_up_follow").strip()
+
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=days * 2 + 40)).strftime("%Y%m%d")
+
+    daily = _daily_from_fetcher(symbol, start, end).tail(days)
+    if daily.empty:
+        return jsonify({"error": "未获取到日线数据"}), 400
+    daily["symbol"] = symbol
+
+    intraday = _intraday_from_fetcher(symbol, count=240)
+    daily, intraday_estimation = _merge_today_estimated_bar(daily, intraday)
+
+    try:
+        signal_result = _generate_realtime_signal_marks(daily, signal_preset)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({
+        "symbol": symbol,
+        "days": days,
+        "signal": signal_result,
+        "intraday_estimation": intraday_estimation,
+        "available_presets": [
+            {"value": key, "label": label}
+            for key, label in REALTIME_SIGNAL_PRESET_LABELS.items()
+        ],
+    })
 
 
 @app.route("/api/market/codex_reason", methods=["POST"])
@@ -739,8 +878,10 @@ def market_codex_reason():
     daily = _daily_from_fetcher(symbol, start, end).tail(days)
     if daily.empty:
         return jsonify({"error": "未获取到日线数据"}), 400
+    daily["symbol"] = symbol
 
     intraday = _intraday_from_fetcher(symbol, count=240)
+    daily, _ = _merge_today_estimated_bar(daily, intraday)
     model_result = _probability_model(daily, backend=backend)
 
     analysis, err = _run_market_codex_reason(symbol, daily, intraday, model_result)
@@ -1633,6 +1774,61 @@ def _build_rule_signal_note(rule_preset: str, delay_days: int) -> str:
     if delay_days <= 0:
         return f"{base}，T+1 执行"
     return f"{base}，延后 {delay_days} 个交易日执行"
+
+
+def _realtime_signal_note(rule_preset: str) -> str:
+    mapping = {
+        "limit_up_follow": "当日涨停，可关注次日跟随机会",
+        "breakout_20d_high": "当日收盘突破前20日高点",
+        "ma5_cross_ma20": "5日均线当日上穿20日均线",
+        "volume_breakout_20d_high": "当日放量突破前20日高点",
+        "oversold_rebound": "前一日超跌后当日转强反弹",
+    }
+    return mapping.get(rule_preset, REALTIME_SIGNAL_PRESET_LABELS.get(rule_preset, rule_preset))
+
+
+def _generate_realtime_signal_marks(daily_df: pd.DataFrame, rule_preset: str) -> Dict[str, Any]:
+    signal_map = {
+        "limit_up_follow": _rule_signal_limit_up_follow,
+        "breakout_20d_high": _rule_signal_breakout_20d_high,
+        "ma5_cross_ma20": _rule_signal_ma5_cross_ma20,
+        "volume_breakout_20d_high": _rule_signal_volume_breakout_20d_high,
+        "oversold_rebound": _rule_signal_oversold_rebound,
+    }
+    signal_fn = signal_map.get(rule_preset)
+    if signal_fn is None:
+        raise ValueError(f"不支持的 signal_preset: {rule_preset}")
+
+    prepared = _prepare_rule_indicator_frame(daily_df)
+    prepared["tradeable"] = prepared["close"].notna() & (pd.to_numeric(prepared["close"], errors="coerce") > 0)
+    symbol_code = _normalize_plain_symbol(str(daily_df.iloc[0].get("symbol") or daily_df.iloc[0].get("stock_code") or "000001")) or "000001"
+    prev_close = pd.to_numeric(prepared["close"], errors="coerce").shift(1)
+    prepared["limit_up"] = [
+        _is_limit_up_close(symbol_code, prev_close.iloc[i], prepared["close"].iloc[i]) if i > 0 else False
+        for i in range(len(prepared))
+    ]
+
+    marks = []
+    for i in range(len(prepared)):
+        row = prepared.iloc[i]
+        if not signal_fn(row):
+            continue
+        price = _to_float(row.get("high") or row.get("close"), 0.0)
+        marks.append({
+            "date": _format_bt_date(row["date"]),
+            "price": round(price, 4),
+            "label": REALTIME_SIGNAL_PRESET_LABELS.get(rule_preset, rule_preset),
+            "note": _realtime_signal_note(rule_preset),
+            "is_latest": bool(i == len(prepared) - 1),
+        })
+
+    return {
+        "preset": rule_preset,
+        "preset_label": REALTIME_SIGNAL_PRESET_LABELS.get(rule_preset, rule_preset),
+        "marks": marks,
+        "latest_signal": marks[-1] if marks else None,
+        "signal_count": len(marks),
+    }
 
 
 def _generate_rule_batches(

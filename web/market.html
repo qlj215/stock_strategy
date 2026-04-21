@@ -257,6 +257,24 @@
   </div>
 
   <div class="metricGrid" id="metrics"></div>
+  <div class="card">
+    <div class="sectionHead">
+      <div>
+        <h3>交易信号发现</h3>
+        <div class="muted">在实时看板中按选定策略扫描交易信号，并在日线图上标出触发日。</div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="field">
+        <label for="signalPreset">信号策略</label>
+        <select id="signalPreset"></select>
+      </div>
+      <div class="field" style="display:flex;align-items:flex-end;gap:10px;">
+        <button onclick="loadSignals()">生成交易信号</button>
+      </div>
+    </div>
+    <div id="signalSummary" class="muted" style="margin-top:10px">等待生成交易信号...</div>
+  </div>
   <div class="card"><div id="dailyChart" style="height:460px"></div></div>
   <div class="card"><div id="intraChart" style="height:360px"></div></div>
   <div class="card" id="predict"></div>
@@ -514,6 +532,8 @@
 
 <script>
 let state = { symbol: '000001', days: 60 };
+let latestOverview = null;
+let latestSignalResponse = null;
 let latestScanResponse = null;
 let latestBacktestResponse = null;
 const BACKTEST_PREVIEW_LIMIT = 20;
@@ -700,6 +720,94 @@ function fillSelectOptions(selectId, values){
   }
 }
 
+function fillOptionObjects(selectId, options){
+  const sel = document.getElementById(selectId);
+  const current = sel.value;
+  sel.innerHTML = (options || []).map(item => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join('');
+  if (current && (options || []).some(item => item.value === current)) {
+    sel.value = current;
+  }
+}
+
+function renderSignalSummary(signalResponse){
+  const box = document.getElementById('signalSummary');
+  const signal = signalResponse?.signal || {};
+  const marks = signal.marks || [];
+  const latest = signal.latest_signal;
+  const est = signalResponse?.intraday_estimation || {};
+  const estText = est.applied
+    ? ` ｜ 当日量额按 ${fmtRatioPercent(est.completion_ratio, 1)} 交易进度估算为全天值`
+    : '';
+
+  if (!marks.length) {
+    box.innerHTML = `${escapeHtml(signal.preset_label || '当前策略')} 暂未发现信号${estText}`;
+    return;
+  }
+
+  box.innerHTML = `${escapeHtml(signal.preset_label || '当前策略')} 共发现 <b>${marks.length}</b> 个信号，最近一次：<b>${escapeHtml(latest?.date || '-')}</b>${latest?.is_latest ? '（含最新交易日）' : ''}，说明：${escapeHtml(latest?.note || '-')}${estText}`;
+}
+
+function renderDailyChart(overview, signalResponse){
+  const d = overview;
+  const x = d.daily.map(i => i.date);
+  const signalMarks = signalResponse?.signal?.marks || [];
+  const markerDates = signalMarks.map(item => item.date);
+  const markerPrices = signalMarks.map(item => item.price);
+  const markerTexts = signalMarks.map(item => `${item.label}<br>${item.date}<br>${item.note}${item.is_latest ? '<br>当日实时信号' : ''}`);
+
+  const traces = [
+    {
+      x,
+      open: d.daily.map(i => i.open),
+      high: d.daily.map(i => i.high),
+      low: d.daily.map(i => i.low),
+      close: d.daily.map(i => i.close),
+      type: 'candlestick',
+      name: '日K',
+      increasing: { line: { color: '#ff5d73' } },
+      decreasing: { line: { color: '#4ac98a' } }
+    },
+    {
+      x,
+      y: d.daily.map(i => i.volume),
+      yaxis: 'y2',
+      type: 'bar',
+      name: '成交量',
+      marker: { color: '#4c5d9e', opacity: 0.35 }
+    }
+  ];
+
+  if (signalMarks.length) {
+    traces.push({
+      x: markerDates,
+      y: markerPrices,
+      type: 'scatter',
+      mode: 'markers+text',
+      name: '交易信号',
+      text: signalMarks.map(item => item.is_latest ? '⚡' : '▲'),
+      textposition: 'top center',
+      hovertemplate: '%{text}<extra></extra>',
+      customdata: markerTexts,
+      marker: {
+        size: signalMarks.map(item => item.is_latest ? 14 : 11),
+        color: signalMarks.map(item => item.is_latest ? '#f5c542' : '#7c8dff'),
+        symbol: signalMarks.map(item => item.is_latest ? 'star' : 'diamond')
+      },
+      hovertext: markerTexts
+    });
+  }
+
+  Plotly.react('dailyChart', traces, {
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { color: '#e8ebff' },
+    xaxis: { rangeslider: { visible: false } },
+    yaxis: { title: '价格' },
+    yaxis2: { title: '成交量', overlaying: 'y', side: 'right', showgrid: false },
+    margin: { l: 48, r: 48, t: 18, b: 42 }
+  }, { responsive: true });
+}
+
 function setSegment(groupId, inputId, value){
   document.getElementById(inputId).value = value;
   document.querySelectorAll(`#${groupId} .seg-btn`).forEach(btn => {
@@ -766,6 +874,11 @@ async function loadOverview(){
   const d = await r.json();
   if (d.error) return alert(d.error);
 
+  latestOverview = d;
+  if ((d.signal_presets || []).length) {
+    fillOptionObjects('signalPreset', d.signal_presets);
+  }
+
   document.getElementById('metrics').innerHTML = `
     <div class="metric"><small>最新日期</small><b>${escapeHtml(d.latest.date)}</b></div>
     <div class="metric"><small>最新价</small><b>${escapeHtml(d.latest.close)}</b></div>
@@ -774,36 +887,7 @@ async function loadOverview(){
     <div class="metric"><small>成交额</small><b>${fmt(d.latest.turnover)}</b></div>
   `;
 
-  const x = d.daily.map(i => i.date);
-  Plotly.react('dailyChart', [
-    {
-      x,
-      open: d.daily.map(i => i.open),
-      high: d.daily.map(i => i.high),
-      low: d.daily.map(i => i.low),
-      close: d.daily.map(i => i.close),
-      type: 'candlestick',
-      name: '日K',
-      increasing: { line: { color: '#ff5d73' } },
-      decreasing: { line: { color: '#4ac98a' } }
-    },
-    {
-      x,
-      y: d.daily.map(i => i.volume),
-      yaxis: 'y2',
-      type: 'bar',
-      name: '成交量',
-      marker: { color: '#4c5d9e', opacity: 0.35 }
-    }
-  ], {
-    paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor: 'rgba(0,0,0,0)',
-    font: { color: '#e8ebff' },
-    xaxis: { rangeslider: { visible: false } },
-    yaxis: { title: '价格' },
-    yaxis2: { title: '成交量', overlaying: 'y', side: 'right', showgrid: false },
-    margin: { l: 48, r: 48, t: 18, b: 42 }
-  }, { responsive: true });
+  renderDailyChart(d, latestSignalResponse);
 
   const xi = d.intraday.map(i => i.dt);
   Plotly.react('intraChart', [
@@ -821,6 +905,7 @@ async function loadOverview(){
   }, { responsive: true });
 
   const p = d.prediction;
+  const est = d.intraday_estimation || {};
   document.getElementById('predict').innerHTML = `
     <div class="sectionHead">
       <div>
@@ -832,10 +917,38 @@ async function loadOverview(){
       <span>当日上涨概率：<b>${pct(p.today_up)}</b></span>
       <span>5日上涨概率：<b>${pct(p.next_5d_up)}</b></span>
       <span>长期上涨概率：<b>${pct(p.long_up)}</b></span>
+      ${est.applied ? `<span>当日量额估算进度：<b>${fmtRatioPercent(est.completion_ratio, 1)}</b></span>` : ''}
     </div>
     <ul>${(p.reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>
     <div class="muted">特征：${escapeHtml(JSON.stringify(p.features || {}))}</div>
+    ${est.applied ? `<div class="muted" style="margin-top:8px;">说明：若当前仍在交易时段，当日成交量与成交额按已交易分钟数折算为全天估算值，用于当天信号展示。</div>` : ''}
   `;
+
+  await loadSignals();
+}
+
+async function loadSignals(){
+  const symbol = document.getElementById('symbol').value.trim();
+  const days = document.getElementById('days').value;
+  const signalPreset = document.getElementById('signalPreset').value || 'limit_up_follow';
+  document.getElementById('signalSummary').innerHTML = '正在生成交易信号...';
+
+  const r = await fetch(`/api/market/signals?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}&signal_preset=${encodeURIComponent(signalPreset)}`);
+  const d = await r.json();
+  if (d.error) {
+    document.getElementById('signalSummary').innerText = '生成失败：' + d.error;
+    return;
+  }
+
+  latestSignalResponse = d;
+  if ((d.available_presets || []).length) {
+    fillOptionObjects('signalPreset', d.available_presets);
+    document.getElementById('signalPreset').value = d.signal?.preset || signalPreset;
+  }
+  renderSignalSummary(d);
+  if (latestOverview) {
+    renderDailyChart(latestOverview, latestSignalResponse);
+  }
 }
 
 async function loadCodex(){
