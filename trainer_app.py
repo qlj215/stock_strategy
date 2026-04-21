@@ -395,7 +395,7 @@ def _merge_today_estimated_bar(daily_df: pd.DataFrame, intraday_df: pd.DataFrame
     raw_volume = float(pd.to_numeric(intra.get("volume"), errors="coerce").fillna(0.0).sum())
     prices = pd.to_numeric(intra.get("price"), errors="coerce")
     vols = pd.to_numeric(intra.get("volume"), errors="coerce").fillna(0.0)
-    raw_turnover = float((prices.fillna(method="ffill").fillna(0.0) * vols).sum())
+    raw_turnover = float((prices.ffill().fillna(0.0) * vols).sum())
     latest_price = float(prices.dropna().iloc[-1]) if prices.dropna().shape[0] else None
     day_high = float(prices.max()) if prices.notna().any() else None
     day_low = float(prices.min()) if prices.notna().any() else None
