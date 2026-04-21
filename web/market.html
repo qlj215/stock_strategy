@@ -291,12 +291,19 @@
         <label for="scanMode">范围模式</label>
         <select id="scanMode" onchange="toggleScanMode()">
           <option value="industry" selected>行业内对比</option>
-          <option value="all">全A股遍历（按成交额优先）</option>
+          <option value="all">全A股遍历</option>
         </select>
       </div>
       <div class="field" id="industryWrap">
         <label for="industry">行业</label>
         <select id="industry"></select>
+      </div>
+      <div class="field" id="scanCandidateModeWrap" style="display:none;">
+        <label for="scanCandidateMode">全市场候选生成</label>
+        <select id="scanCandidateMode">
+          <option value="turnover_priority" selected>按成交额优先</option>
+          <option value="full_order">不按成交额优先</option>
+        </select>
       </div>
       <div class="field">
         <label for="scanBoardFilter">板块筛选</label>
@@ -821,6 +828,7 @@ function setSegment(groupId, inputId, value){
 function toggleScanMode(){
   const mode = document.getElementById('scanMode').value;
   document.getElementById('industryWrap').style.display = mode === 'industry' ? 'block' : 'none';
+  document.getElementById('scanCandidateModeWrap').style.display = mode === 'all' ? 'block' : 'none';
 }
 
 function toggleBacktestControls(){
@@ -985,11 +993,13 @@ async function runScan(){
   const mode = document.getElementById('scanMode').value;
   const industry = document.getElementById('industry').value;
   const boardFilter = document.getElementById('scanBoardFilter').value;
+  const candidateMode = document.getElementById('scanCandidateMode').value;
   const limit = document.getElementById('scanLimit').value;
   const sortBy = document.getElementById('scanSortBy').value;
   const days = document.getElementById('days').value;
 
   const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days, board_filter: boardFilter });
+  if (mode === 'all') params.set('candidate_mode', candidateMode);
   if (mode === 'industry') params.set('industry', industry);
 
   document.getElementById('scanResult').innerHTML = '扫描中，请稍候（样本越大越慢）...';
@@ -1012,6 +1022,7 @@ async function runScan(){
     <div class="statusStrip">
       <span>范围：${escapeHtml(d.industry)}</span>
       <span>板块筛选：${escapeHtml(d.board_filter_label || '全部')}</span>
+      ${d.mode === 'all' ? `<span>候选生成：${escapeHtml(d.candidate_mode_label || d.candidate_mode || '-')}</span>` : ''}
       <span>排序：${escapeHtml(d.sort_by_label || d.sort_by || '')}</span>
       <span>时间：${escapeHtml(d.scan_time || '-')}</span>
     </div>

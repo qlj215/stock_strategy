@@ -66,6 +66,10 @@ SCAN_SORT_LABELS = {
     "pct": "当日涨跌幅",
     "turnover": "成交额",
 }
+SCAN_CANDIDATE_MODE_LABELS = {
+    "turnover_priority": "按成交额优先",
+    "full_order": "不按成交额优先",
+}
 BOARD_FILTER_LABELS = {
     "all": "全部",
     "gem_only": "仅创业板",
@@ -959,10 +963,13 @@ def market_scan():
     days = max(20, min(int(request.args.get("days", "60")), 250))
     limit = max(1, min(int(request.args.get("limit", "30")), 400))
     backend = (request.args.get("backend") or "").strip() or None
+    candidate_mode = (request.args.get("candidate_mode") or "turnover_priority").strip()
 
     allowed_sort = {"today_up", "next_5d_up", "long_up", "pct", "turnover"}
     if sort_by not in allowed_sort:
         sort_by = "next_5d_up"
+    if candidate_mode not in SCAN_CANDIDATE_MODE_LABELS:
+        candidate_mode = "turnover_priority"
 
     try:
         symbols = []
@@ -1013,13 +1020,15 @@ def market_scan():
             if not all_symbols:
                 return jsonify({
                     "mode": mode,
-                    "mode_label": "全A股遍历（按成交额优先）",
+                    "mode_label": f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
                     "industry": "全A股",
                     "sector_source": sector_source,
                     "board_filter": board_filter,
                     "board_filter_label": BOARD_FILTER_LABELS[board_filter],
                     "sort_by": sort_by,
                     "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
+                    "candidate_mode": candidate_mode,
+                    "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
                     "days": days,
                     "requested": 0,
                     "success": 0,
@@ -1030,16 +1039,19 @@ def market_scan():
                     "top": [],
                 })
 
-            snapshots = get_realtime_snapshots(all_symbols, chunk_size=800)
-            if not snapshots:
-                return jsonify({"error": "无法获取全市场实时快照，请稍后重试。"}), 500
+            if candidate_mode == "turnover_priority":
+                snapshots = get_realtime_snapshots(all_symbols, chunk_size=800)
+                if not snapshots:
+                    return jsonify({"error": "无法获取全市场实时快照，请稍后重试。"}), 500
 
-            ranked = sorted(
-                snapshots.items(),
-                key=lambda kv: _to_float((kv[1] or {}).get("amount"), 0.0),
-                reverse=True,
-            )
-            symbols = [code for code, _ in ranked[:limit]]
+                ranked = sorted(
+                    snapshots.items(),
+                    key=lambda kv: _to_float((kv[1] or {}).get("amount"), 0.0),
+                    reverse=True,
+                )
+                symbols = [code for code, _ in ranked[:limit]]
+            else:
+                symbols = list(all_symbols[:limit])
             names_map = {s: get_symbol_name(s) for s in symbols}
         else:
             return jsonify({"error": "mode 仅支持 industry 或 all"}), 400
@@ -1053,8 +1065,8 @@ def market_scan():
                     failed.append(s)
                     continue
 
-                # all 模式下优先使用实时快照的最新价/成交额
-                if mode == "all":
+                # all 模式且启用成交额优先时，优先使用实时快照的最新价/成交额
+                if mode == "all" and candidate_mode == "turnover_priority":
                     snap = snapshots.get(s, {})
                     if snap:
                         last_price = _to_float(snap.get("lastPrice"), 0.0)
@@ -1075,13 +1087,15 @@ def market_scan():
 
         return jsonify({
             "mode": mode,
-            "mode_label": "行业内对比" if mode == "industry" else "全A股遍历（按成交额优先）",
+            "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
             "industry": industry if mode == "industry" else "全A股",
             "sector_source": sector_source,
             "model_backend": get_backend_runtime_status(backend),
             "days": days,
             "sort_by": sort_by,
             "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
+            "candidate_mode": candidate_mode,
+            "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
             "board_filter": board_filter,
             "board_filter_label": BOARD_FILTER_LABELS[board_filter],
             "filtered_universe": filtered_universe or len(symbols),
