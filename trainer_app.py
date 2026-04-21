@@ -906,7 +906,8 @@ def market_codex_reason():
 
 def _to_float(v, default=0.0):
     try:
-        return float(v)
+        out = float(v)
+        return out if np.isfinite(out) else default
     except Exception:
         return default
 
