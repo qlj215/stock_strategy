@@ -171,6 +171,27 @@
       color: #f7d873;
       font-size: 13px;
     }
+    .progressBox {
+      margin-top: 10px;
+      background: rgba(16, 21, 43, 0.7);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .progressBar {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .progressFill {
+      height: 100%;
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      width: 0%;
+      transition: width 0.25s ease;
+    }
     .splitCols {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -548,6 +569,7 @@ let state = { symbol: '000001', days: 60 };
 let latestOverview = null;
 let latestSignalResponse = null;
 let latestScanResponse = null;
+let latestScanJobId = null;
 let latestBacktestResponse = null;
 const BACKTEST_PREVIEW_LIMIT = 20;
 const backtestExpandState = { batches: false, trades: false };
@@ -635,6 +657,7 @@ function buildScanExportMeta(scan){
     ['模式', scan.mode_label || scan.mode || ''],
     ['范围', scan.industry || ''],
     ['板块筛选', scan.board_filter_label || '全部'],
+    ['候选生成', scan.candidate_mode_label || scan.candidate_mode || ''],
     ['排序', scan.sort_by_label || scan.sort_by || ''],
     ['观察窗口', scan.days ? `${scan.days}日` : ''],
     ['筛选后样本池', scan.filtered_universe ?? ''],
@@ -997,34 +1020,7 @@ async function loadSectors(){
   fillSelectOptions('btIndustry', sectors);
 }
 
-async function runScan(){
-  const mode = document.getElementById('scanMode').value;
-  const industry = document.getElementById('industry').value;
-  const boardFilter = document.getElementById('scanBoardFilter').value;
-  const candidateMode = document.getElementById('scanCandidateMode').value;
-  const randomSeed = document.getElementById('scanRandomSeed').value;
-  const limit = document.getElementById('scanLimit').value;
-  const sortBy = document.getElementById('scanSortBy').value;
-  const days = document.getElementById('days').value;
-
-  const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days, board_filter: boardFilter });
-  if (mode === 'all') {
-    params.set('candidate_mode', candidateMode);
-    if (candidateMode === 'random_sample') params.set('random_seed', randomSeed || '42');
-  }
-  if (mode === 'industry') params.set('industry', industry);
-
-  document.getElementById('scanResult').innerHTML = candidateMode === 'full_universe'
-    ? '正在做全样本全量计算，请耐心等一下，这会明显更慢...'
-    : '扫描中，请稍候（样本越大越慢）...';
-
-  const r = await fetch('/api/market/scan?' + params.toString());
-  const d = await r.json();
-  if (d.error) {
-    document.getElementById('scanResult').innerText = '扫描失败：' + d.error;
-    return;
-  }
-
+function renderScanResult(d){
   latestScanResponse = d;
   const rows = d.top || [];
   if (!rows.length) {
@@ -1075,6 +1071,93 @@ async function runScan(){
       </table>
     </div>
   `;
+}
+
+async function pollScanJob(jobId){
+  latestScanJobId = jobId;
+  while (latestScanJobId === jobId) {
+    const r = await fetch(`/api/market/scan/${encodeURIComponent(jobId)}`);
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById('scanResult').innerText = '扫描失败：' + d.error;
+      latestScanJobId = null;
+      return;
+    }
+
+    const pct = Math.max(0, Math.min(100, Math.round(Number(d.progress || 0) * 100)));
+    document.getElementById('scanResult').innerHTML = `
+      <div class="progressBox">
+        <div class="statusStrip">
+          <span>状态：${escapeHtml(d.status || '-')}</span>
+          <span>进度：${pct}%</span>
+          <span>已完成：${d.completed || 0} / ${d.requested || 0}</span>
+          <span>成功：${d.success || 0}</span>
+          <span>失败：${d.failed || 0}</span>
+        </div>
+        <div class="muted" style="margin-top:8px;">当前处理：${escapeHtml(d.current_symbol || '准备中...')}</div>
+        <div class="progressBar"><div class="progressFill" style="width:${pct}%;"></div></div>
+      </div>
+    `;
+
+    if (d.status === 'done') {
+      latestScanJobId = null;
+      renderScanResult(d.result || {});
+      return;
+    }
+    if (d.status === 'error') {
+      latestScanJobId = null;
+      document.getElementById('scanResult').innerText = '扫描失败：' + (d.error || 'unknown');
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+}
+
+async function runScan(){
+  const mode = document.getElementById('scanMode').value;
+  const industry = document.getElementById('industry').value;
+  const boardFilter = document.getElementById('scanBoardFilter').value;
+  const candidateMode = document.getElementById('scanCandidateMode').value;
+  const randomSeed = document.getElementById('scanRandomSeed').value;
+  const limit = document.getElementById('scanLimit').value;
+  const sortBy = document.getElementById('scanSortBy').value;
+  const days = document.getElementById('days').value;
+
+  const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days, board_filter: boardFilter });
+  if (mode === 'all') {
+    params.set('candidate_mode', candidateMode);
+    if (candidateMode === 'random_sample') params.set('random_seed', randomSeed || '42');
+  }
+  if (mode === 'industry') params.set('industry', industry);
+
+  if (candidateMode === 'full_universe') {
+    params.set('async', '1');
+    document.getElementById('scanResult').innerHTML = `
+      <div class="progressBox">
+        <div class="statusStrip"><span>状态：排队中</span><span>进度：0%</span></div>
+        <div class="progressBar"><div class="progressFill" style="width:0%;"></div></div>
+      </div>
+    `;
+    const r = await fetch('/api/market/scan?' + params.toString());
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById('scanResult').innerText = '扫描失败：' + d.error;
+      return;
+    }
+    await pollScanJob(d.job_id);
+    return;
+  }
+
+  latestScanJobId = null;
+  document.getElementById('scanResult').innerHTML = '扫描中，请稍候（样本越大越慢）...';
+
+  const r = await fetch('/api/market/scan?' + params.toString());
+  const d = await r.json();
+  if (d.error) {
+    document.getElementById('scanResult').innerText = '扫描失败：' + d.error;
+    return;
+  }
+  renderScanResult(d);
 }
 
 function renderBacktestWarnings(items){

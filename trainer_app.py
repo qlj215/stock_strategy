@@ -59,6 +59,7 @@ HISTORY_PANEL_CACHE = {
 CHALLENGES = {}
 REVIEWS = {}
 REPLAY_JOBS = {}
+SCAN_JOBS = {}
 SCAN_SORT_LABELS = {
     "today_up": "当日上涨概率",
     "next_5d_up": "5日上涨概率",
@@ -956,9 +957,184 @@ def market_sectors():
     })
 
 
+def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filter: str, sort_by: str, days: int, backend: str | None, candidate_mode: str, filtered_universe: int) -> Dict[str, Any]:
+    return {
+        "mode": mode,
+        "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
+        "industry": industry if mode == "industry" else "全A股",
+        "sector_source": sector_source,
+        "board_filter": board_filter,
+        "board_filter_label": BOARD_FILTER_LABELS[board_filter],
+        "sort_by": sort_by,
+        "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
+        "candidate_mode": candidate_mode,
+        "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
+        "days": days,
+        "requested": 0,
+        "success": 0,
+        "failed": 0,
+        "filtered_universe": filtered_universe,
+        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "model_backend": get_backend_runtime_status(backend),
+        "top": [],
+    }
+
+
+def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: str, days: int, limit: int, backend: str | None, candidate_mode: str, random_seed: int, job_id: str | None = None) -> Dict[str, Any]:
+    symbols = []
+    names_map = {}
+    snapshots = {}
+    sector_source = "all_mode"
+    filtered_universe = 0
+
+    if mode == "industry":
+        if not industry:
+            raise ValueError("industry 模式需要 industry 参数")
+
+        reg = _get_sector_registry(force_refresh=False)
+        available_sectors = set(reg.get("sectors", []))
+
+        if reg.get("source") == "miniqmt_dynamic" and industry in available_sectors:
+            symbols = list_symbols_in_dynamic_sector(industry, limit=None)
+            sector_source = "miniqmt_dynamic"
+        else:
+            symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS.get(industry, [])]
+            sector_source = "local_fallback"
+
+        if not symbols:
+            if industry in LOCAL_SECTOR_SYMBOLS:
+                symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS[industry]]
+                sector_source = "local_fallback"
+            else:
+                raise ValueError(f"不支持的行业：{industry}")
+
+        symbols = _apply_board_filter(symbols, board_filter)
+        filtered_universe = len(symbols)
+        symbols = symbols[:limit]
+        names_map = {s: get_symbol_name(s) for s in symbols}
+
+    elif mode == "all":
+        sector_source = "miniqmt_realtime"
+        all_symbols = list_a_share_symbols()
+        if not all_symbols:
+            raise RuntimeError("无法获取全A股列表，请确认 MiniQMT 已连接且行情可用。")
+
+        all_symbols = _apply_board_filter(all_symbols, board_filter)
+        filtered_universe = len(all_symbols)
+        if not all_symbols:
+            return _scan_empty_result(mode, industry, sector_source, board_filter, sort_by, days, backend, candidate_mode, filtered_universe)
+
+        if candidate_mode == "turnover_priority":
+            snapshots = get_realtime_snapshots(all_symbols, chunk_size=800)
+            if not snapshots:
+                raise RuntimeError("无法获取全市场实时快照，请稍后重试。")
+            ranked = sorted(snapshots.items(), key=lambda kv: _to_float((kv[1] or {}).get("amount"), 0.0), reverse=True)
+            symbols = [code for code, _ in ranked[:limit]]
+        elif candidate_mode == "random_sample":
+            rng = random.Random(random_seed)
+            symbols = list(all_symbols) if len(all_symbols) <= limit else rng.sample(list(all_symbols), limit)
+        elif candidate_mode == "full_universe":
+            symbols = list(all_symbols)
+        else:
+            symbols = list(all_symbols[:limit])
+        names_map = {s: get_symbol_name(s) for s in symbols}
+    else:
+        raise ValueError("mode 仅支持 industry 或 all")
+
+    rows = []
+    failed = []
+    total = len(symbols)
+    for idx, s in enumerate(symbols, start=1):
+        if job_id and job_id in SCAN_JOBS:
+            SCAN_JOBS[job_id].update({
+                "status": "running",
+                "progress": round(idx / max(total, 1), 4),
+                "completed": idx - 1,
+                "requested": total,
+                "current_symbol": s,
+            })
+        try:
+            item = _calc_symbol_snapshot(s, days=days, backend=backend)
+            if not item:
+                failed.append(s)
+                continue
+            if mode == "all" and candidate_mode == "turnover_priority":
+                snap = snapshots.get(s, {})
+                if snap:
+                    last_price = _to_float(snap.get("lastPrice"), 0.0)
+                    amount = _to_float(snap.get("amount"), 0.0)
+                    if last_price > 0:
+                        item["close"] = round(last_price, 3)
+                    if amount > 0:
+                        item["turnover"] = amount
+            if names_map.get(s):
+                item["name"] = names_map[s]
+            item["board"] = _classify_symbol_board(s)
+            rows.append(item)
+        except Exception:
+            failed.append(s)
+        if job_id and job_id in SCAN_JOBS:
+            SCAN_JOBS[job_id].update({
+                "completed": idx,
+                "success": len(rows),
+                "failed": len(failed),
+                "progress": round(idx / max(total, 1), 4),
+            })
+
+    rows = sorted(rows, key=lambda x: x.get(sort_by, 0), reverse=True)
+    if candidate_mode != "full_universe":
+        rows = rows[:limit]
+
+    return {
+        "mode": mode,
+        "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
+        "industry": industry if mode == "industry" else "全A股",
+        "sector_source": sector_source,
+        "model_backend": get_backend_runtime_status(backend),
+        "days": days,
+        "sort_by": sort_by,
+        "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
+        "candidate_mode": candidate_mode,
+        "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
+        "random_seed": random_seed if candidate_mode == "random_sample" else None,
+        "board_filter": board_filter,
+        "board_filter_label": BOARD_FILTER_LABELS[board_filter],
+        "filtered_universe": filtered_universe or len(symbols),
+        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "requested": len(symbols),
+        "success": len(rows),
+        "failed": len(failed),
+        "top": rows,
+    }
+
+
+def _run_scan_job(job_id: str, params: Dict[str, Any]):
+    job = SCAN_JOBS[job_id]
+    job.update({"status": "running", "started_at": datetime.now().isoformat()})
+    try:
+        result = _run_market_scan_core(job_id=job_id, **params)
+        job.update({
+            "status": "done",
+            "progress": 1.0,
+            "completed": result.get("requested", 0),
+            "requested": result.get("requested", 0),
+            "success": result.get("success", 0),
+            "failed": result.get("failed", 0),
+            "result": result,
+            "finished_at": datetime.now().isoformat(),
+            "current_symbol": "",
+        })
+    except Exception as e:
+        job.update({
+            "status": "error",
+            "error": str(e),
+            "finished_at": datetime.now().isoformat(),
+        })
+
+
 @app.route("/api/market/scan")
 def market_scan():
-    mode = (request.args.get("mode") or "industry").strip()  # industry | all
+    mode = (request.args.get("mode") or "industry").strip()
     industry = (request.args.get("industry") or "").strip()
     sort_by = (request.args.get("sort_by") or "next_5d_up").strip()
     board_filter = _normalize_board_filter(request.args.get("board_filter"))
@@ -967,6 +1143,7 @@ def market_scan():
     backend = (request.args.get("backend") or "").strip() or None
     candidate_mode = (request.args.get("candidate_mode") or "turnover_priority").strip()
     random_seed = int(request.args.get("random_seed", "42") or 42)
+    async_mode = request.args.get("async", "0") == "1"
 
     allowed_sort = {"today_up", "next_5d_up", "long_up", "pct", "turnover"}
     if sort_by not in allowed_sort:
@@ -974,153 +1151,49 @@ def market_scan():
     if candidate_mode not in SCAN_CANDIDATE_MODE_LABELS:
         candidate_mode = "turnover_priority"
 
+    params = {
+        "mode": mode,
+        "industry": industry,
+        "sort_by": sort_by,
+        "board_filter": board_filter,
+        "days": days,
+        "limit": limit,
+        "backend": backend,
+        "candidate_mode": candidate_mode,
+        "random_seed": random_seed,
+    }
+
     try:
-        symbols = []
-        names_map = {}
-        snapshots = {}
+        if async_mode:
+            job_id = str(uuid.uuid4())
+            SCAN_JOBS[job_id] = {
+                "status": "queued",
+                "progress": 0.0,
+                "completed": 0,
+                "requested": 0,
+                "success": 0,
+                "failed": 0,
+                "current_symbol": "",
+                "created_at": datetime.now().isoformat(),
+                "params": params,
+            }
+            t = threading.Thread(target=_run_scan_job, args=(job_id, params), daemon=True)
+            t.start()
+            return jsonify({"job_id": job_id, "status": "queued"})
 
-        sector_source = "all_mode"
-        filtered_universe = 0
-
-        if mode == "industry":
-            if not industry:
-                return jsonify({"error": "industry 模式需要 industry 参数"}), 400
-
-            reg = _get_sector_registry(force_refresh=False)
-            available_sectors = set(reg.get("sectors", []))
-
-            if reg.get("source") == "miniqmt_dynamic" and industry in available_sectors:
-                symbols = list_symbols_in_dynamic_sector(industry, limit=None)
-                sector_source = "miniqmt_dynamic"
-            else:
-                symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS.get(industry, [])]
-                sector_source = "local_fallback"
-
-            if not symbols:
-                # 动态源拿不到时，再兜底一次本地池
-                if industry in LOCAL_SECTOR_SYMBOLS:
-                    symbols = [str(x).zfill(6) for x in LOCAL_SECTOR_SYMBOLS[industry]]
-                    sector_source = "local_fallback"
-                else:
-                    return jsonify({
-                        "error": f"不支持的行业：{industry}",
-                        "available": sorted(list(available_sectors)) if available_sectors else sorted(LOCAL_SECTOR_SYMBOLS.keys()),
-                    }), 400
-
-            symbols = _apply_board_filter(symbols, board_filter)
-            filtered_universe = len(symbols)
-            symbols = symbols[:limit]
-            names_map = {s: get_symbol_name(s) for s in symbols}
-
-        elif mode == "all":
-            sector_source = "miniqmt_realtime"
-            all_symbols = list_a_share_symbols()
-            if not all_symbols:
-                return jsonify({"error": "无法获取全A股列表，请确认 MiniQMT 已连接且行情可用。"}), 500
-
-            all_symbols = _apply_board_filter(all_symbols, board_filter)
-            filtered_universe = len(all_symbols)
-            if not all_symbols:
-                return jsonify({
-                    "mode": mode,
-                    "mode_label": f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
-                    "industry": "全A股",
-                    "sector_source": sector_source,
-                    "board_filter": board_filter,
-                    "board_filter_label": BOARD_FILTER_LABELS[board_filter],
-                    "sort_by": sort_by,
-                    "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
-                    "candidate_mode": candidate_mode,
-                    "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
-                    "days": days,
-                    "requested": 0,
-                    "success": 0,
-                    "failed": 0,
-                    "filtered_universe": filtered_universe,
-                    "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "model_backend": get_backend_runtime_status(backend),
-                    "top": [],
-                })
-
-            if candidate_mode == "turnover_priority":
-                snapshots = get_realtime_snapshots(all_symbols, chunk_size=800)
-                if not snapshots:
-                    return jsonify({"error": "无法获取全市场实时快照，请稍后重试。"}), 500
-
-                ranked = sorted(
-                    snapshots.items(),
-                    key=lambda kv: _to_float((kv[1] or {}).get("amount"), 0.0),
-                    reverse=True,
-                )
-                symbols = [code for code, _ in ranked[:limit]]
-            elif candidate_mode == "random_sample":
-                rng = random.Random(random_seed)
-                if len(all_symbols) <= limit:
-                    symbols = list(all_symbols)
-                else:
-                    symbols = rng.sample(list(all_symbols), limit)
-            elif candidate_mode == "full_universe":
-                symbols = list(all_symbols)
-            else:
-                symbols = list(all_symbols[:limit])
-            names_map = {s: get_symbol_name(s) for s in symbols}
-        else:
-            return jsonify({"error": "mode 仅支持 industry 或 all"}), 400
-
-        rows = []
-        failed = []
-        for s in symbols:
-            try:
-                item = _calc_symbol_snapshot(s, days=days, backend=backend)
-                if not item:
-                    failed.append(s)
-                    continue
-
-                # all 模式且启用成交额优先时，优先使用实时快照的最新价/成交额
-                if mode == "all" and candidate_mode == "turnover_priority":
-                    snap = snapshots.get(s, {})
-                    if snap:
-                        last_price = _to_float(snap.get("lastPrice"), 0.0)
-                        amount = _to_float(snap.get("amount"), 0.0)
-                        if last_price > 0:
-                            item["close"] = round(last_price, 3)
-                        if amount > 0:
-                            item["turnover"] = amount
-
-                if names_map.get(s):
-                    item["name"] = names_map[s]
-                item["board"] = _classify_symbol_board(s)
-                rows.append(item)
-            except Exception:
-                failed.append(s)
-
-        rows = sorted(rows, key=lambda x: x.get(sort_by, 0), reverse=True)
-        if candidate_mode != "full_universe":
-            rows = rows[:limit]
-
-        return jsonify({
-            "mode": mode,
-            "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
-            "industry": industry if mode == "industry" else "全A股",
-            "sector_source": sector_source,
-            "model_backend": get_backend_runtime_status(backend),
-            "days": days,
-            "sort_by": sort_by,
-            "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
-            "candidate_mode": candidate_mode,
-            "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
-            "random_seed": random_seed if candidate_mode == "random_sample" else None,
-            "board_filter": board_filter,
-            "board_filter_label": BOARD_FILTER_LABELS[board_filter],
-            "filtered_universe": filtered_universe or len(symbols),
-            "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "requested": len(symbols),
-            "success": len(rows),
-            "failed": len(failed),
-            "top": rows,
-        })
+        result = _run_market_scan_core(**params)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"批量扫描失败: {str(e)}"}), 500
+
+
+@app.route("/api/market/scan/<job_id>")
+def market_scan_status(job_id: str):
+    if job_id not in SCAN_JOBS:
+        return jsonify({"error": "任务不存在"}), 404
+    return jsonify(SCAN_JOBS[job_id])
 
 
 def _safe_div(a: float, b: float) -> float:
