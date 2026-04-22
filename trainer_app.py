@@ -912,12 +912,28 @@ def _to_float(v, default=0.0):
         return default
 
 
-def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = None) -> Dict:
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
-    daily = _daily_from_fetcher(symbol, start, end).tail(days)
+def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = None, anchor_dt: Any = None) -> Dict:
+    anchor_ts = pd.Timestamp(anchor_dt) if anchor_dt is not None else pd.Timestamp.now()
+    anchor_ts = anchor_ts.floor("min")
+    anchor_day = anchor_ts.normalize()
+
+    end = anchor_day.strftime("%Y%m%d")
+    start = (anchor_day - pd.Timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
+    daily = _daily_from_fetcher(symbol, start, end)
+    daily = daily[daily["date"] <= anchor_day].tail(days)
     if daily.empty:
         return {}
+
+    intraday_estimation = None
+    if anchor_day == pd.Timestamp.now().normalize():
+        intraday = _intraday_from_fetcher(symbol, count=240)
+        if intraday is not None and not intraday.empty:
+            intra = intraday.copy()
+            intra["dt"] = pd.to_datetime(intra["dt"], errors="coerce")
+            intra = intra.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
+            intra = intra[intra["dt"] <= anchor_ts].reset_index(drop=True)
+            if not intra.empty:
+                daily, intraday_estimation = _merge_today_estimated_bar(daily, intra)
 
     pred = _probability_model(daily, backend=backend)
     latest = daily.iloc[-1]
@@ -933,6 +949,8 @@ def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = Non
         "long_up": round(pred["p_up_long"], 4),
         "model_backend": pred.get("backend", "rule"),
         "model_backend_fallback": bool(pred.get("backend_fallback", False)),
+        "snapshot_date": latest.get("date").strftime("%Y-%m-%d") if pd.notna(latest.get("date")) else "",
+        "intraday_estimation_applied": bool((intraday_estimation or {}).get("applied", False)),
     }
 
 
@@ -958,7 +976,59 @@ def market_sectors():
     })
 
 
-def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filter: str, sort_by: str, days: int, backend: str | None, candidate_mode: str, filtered_universe: int) -> Dict[str, Any]:
+def _parse_scan_anchor(scan_date: str, scan_time: str) -> tuple[pd.Timestamp, Dict[str, Any]]:
+    now = pd.Timestamp.now().floor("min")
+    date_raw = str(scan_date or "").strip()
+    time_raw = str(scan_time or "").strip()
+    notes: List[str] = []
+
+    if date_raw:
+        date_ts = pd.to_datetime(date_raw, errors="coerce")
+        if pd.isna(date_ts):
+            raise ValueError("scan_date 格式错误，应为 YYYY-MM-DD")
+        date_ts = pd.Timestamp(date_ts).normalize()
+    else:
+        date_ts = now.normalize()
+
+    if time_raw:
+        m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", time_raw)
+        if not m:
+            raise ValueError("scan_time 格式错误，应为 HH:MM")
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+    else:
+        hour = int(now.hour)
+        minute = int(now.minute)
+
+    anchor_ts = date_ts + pd.Timedelta(hours=hour, minutes=minute)
+    if anchor_ts > now:
+        anchor_ts = now
+        notes.append("所选扫描时点晚于当前时间，已自动截到当前时刻。")
+
+    return anchor_ts, {
+        "is_custom": bool(date_raw or time_raw),
+        "requested_date": date_ts.strftime("%Y-%m-%d"),
+        "requested_time": time_raw,
+        "effective_date": anchor_ts.strftime("%Y-%m-%d"),
+        "effective_time": anchor_ts.strftime("%H:%M"),
+        "notes": notes,
+    }
+
+
+def _is_intraday_trading_time(ts: pd.Timestamp) -> bool:
+    minute_of_day = int(ts.hour) * 60 + int(ts.minute)
+    return (9 * 60 + 30) <= minute_of_day <= (11 * 60 + 30) or (13 * 60) <= minute_of_day <= (15 * 60)
+
+
+def _build_scan_anchor_label(anchor_ts: pd.Timestamp, is_custom: bool) -> str:
+    if anchor_ts.normalize() == pd.Timestamp.now().normalize() and _is_intraday_trading_time(anchor_ts):
+        return f"{anchor_ts.strftime('%Y-%m-%d %H:%M')}（盘中估算）"
+    if is_custom:
+        return f"{anchor_ts.strftime('%Y-%m-%d')} 收盘"
+    return "当前最新收盘口径"
+
+
+def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filter: str, sort_by: str, days: int, backend: str | None, candidate_mode: str, filtered_universe: int, scan_anchor_label: str, scan_anchor_meta: Dict[str, Any], notes: List[str]) -> Dict[str, Any]:
     return {
         "mode": mode,
         "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
@@ -976,17 +1046,24 @@ def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filte
         "failed": 0,
         "filtered_universe": filtered_universe,
         "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "scan_anchor_label": scan_anchor_label,
+        "scan_anchor_meta": scan_anchor_meta,
+        "notes": list(notes or []),
         "model_backend": get_backend_runtime_status(backend),
         "top": [],
     }
 
 
-def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: str, days: int, limit: int, backend: str | None, candidate_mode: str, random_seed: int, job_id: str | None = None) -> Dict[str, Any]:
+def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: str, days: int, limit: int, backend: str | None, candidate_mode: str, random_seed: int, scan_date: str = "", scan_time: str = "", job_id: str | None = None) -> Dict[str, Any]:
     symbols = []
     names_map = {}
     snapshots = {}
     sector_source = "all_mode"
     filtered_universe = 0
+    anchor_ts, scan_anchor_meta = _parse_scan_anchor(scan_date, scan_time)
+    notes = list(scan_anchor_meta.get("notes", []))
+    scan_anchor_label = _build_scan_anchor_label(anchor_ts, bool(scan_anchor_meta.get("is_custom")))
+    effective_candidate_mode = candidate_mode
 
     if mode == "industry":
         if not industry:
@@ -1023,18 +1100,22 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
         all_symbols = _apply_board_filter(all_symbols, board_filter)
         filtered_universe = len(all_symbols)
         if not all_symbols:
-            return _scan_empty_result(mode, industry, sector_source, board_filter, sort_by, days, backend, candidate_mode, filtered_universe)
+            return _scan_empty_result(mode, industry, sector_source, board_filter, sort_by, days, backend, effective_candidate_mode, filtered_universe, scan_anchor_label, scan_anchor_meta, notes)
 
-        if candidate_mode == "turnover_priority":
+        if effective_candidate_mode == "turnover_priority" and scan_anchor_meta.get("is_custom"):
+            effective_candidate_mode = "full_order"
+            notes.append("自定义扫描时点暂不支持按成交额优先候选，已自动改为不按成交额优先。")
+
+        if effective_candidate_mode == "turnover_priority":
             snapshots = get_realtime_snapshots(all_symbols, chunk_size=800)
             if not snapshots:
                 raise RuntimeError("无法获取全市场实时快照，请稍后重试。")
             ranked = sorted(snapshots.items(), key=lambda kv: _to_float((kv[1] or {}).get("amount"), 0.0), reverse=True)
             symbols = [code for code, _ in ranked[:limit]]
-        elif candidate_mode == "random_sample":
+        elif effective_candidate_mode == "random_sample":
             rng = random.Random(random_seed)
             symbols = list(all_symbols) if len(all_symbols) <= limit else rng.sample(list(all_symbols), limit)
-        elif candidate_mode == "full_universe":
+        elif effective_candidate_mode == "full_universe":
             symbols = list(all_symbols)
         else:
             symbols = list(all_symbols[:limit])
@@ -1055,11 +1136,11 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
                 "current_symbol": s,
             })
         try:
-            item = _calc_symbol_snapshot(s, days=days, backend=backend)
+            item = _calc_symbol_snapshot(s, days=days, backend=backend, anchor_dt=anchor_ts)
             if not item:
                 failed.append(s)
                 continue
-            if mode == "all" and candidate_mode == "turnover_priority":
+            if mode == "all" and effective_candidate_mode == "turnover_priority":
                 snap = snapshots.get(s, {})
                 if snap:
                     last_price = _to_float(snap.get("lastPrice"), 0.0)
@@ -1083,25 +1164,30 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
             })
 
     rows = sorted(rows, key=lambda x: x.get(sort_by, 0), reverse=True)
-    if candidate_mode != "full_universe":
+    if effective_candidate_mode != "full_universe":
         rows = rows[:limit]
 
     return {
         "mode": mode,
-        "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
+        "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[effective_candidate_mode]}）",
         "industry": industry if mode == "industry" else "全A股",
         "sector_source": sector_source,
         "model_backend": get_backend_runtime_status(backend),
         "days": days,
         "sort_by": sort_by,
         "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
-        "candidate_mode": candidate_mode,
-        "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[candidate_mode],
-        "random_seed": random_seed if candidate_mode == "random_sample" else None,
+        "candidate_mode": effective_candidate_mode,
+        "candidate_mode_label": SCAN_CANDIDATE_MODE_LABELS[effective_candidate_mode],
+        "candidate_mode_requested": candidate_mode,
+        "candidate_mode_requested_label": SCAN_CANDIDATE_MODE_LABELS.get(candidate_mode, candidate_mode),
+        "random_seed": random_seed if effective_candidate_mode == "random_sample" else None,
         "board_filter": board_filter,
         "board_filter_label": BOARD_FILTER_LABELS[board_filter],
         "filtered_universe": filtered_universe or len(symbols),
         "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "scan_anchor_label": scan_anchor_label,
+        "scan_anchor_meta": scan_anchor_meta,
+        "notes": notes,
         "requested": len(symbols),
         "success": len(rows),
         "failed": len(failed),
@@ -1144,6 +1230,8 @@ def market_scan():
     backend = (request.args.get("backend") or "").strip() or None
     candidate_mode = (request.args.get("candidate_mode") or "turnover_priority").strip()
     random_seed = int(request.args.get("random_seed", "42") or 42)
+    scan_date = (request.args.get("scan_date") or "").strip()
+    scan_time = (request.args.get("scan_time") or "").strip()
     async_mode = request.args.get("async", "0") == "1"
 
     allowed_sort = {"today_up", "next_5d_up", "long_up", "pct", "turnover"}
@@ -1162,6 +1250,8 @@ def market_scan():
         "backend": backend,
         "candidate_mode": candidate_mode,
         "random_seed": random_seed,
+        "scan_date": scan_date,
+        "scan_time": scan_time,
     }
 
     try:

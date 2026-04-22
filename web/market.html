@@ -333,6 +333,22 @@
         <input id="scanRandomSeed" type="number" value="42" min="0" step="1" />
       </div>
       <div class="field">
+        <label>扫描时点</label>
+        <label style="display:flex;align-items:center;gap:8px;height:40px;">
+          <input id="scanUseCurrentTime" type="checkbox" checked onchange="toggleScanAnchorMode()" />
+          <span>使用当前时间</span>
+        </label>
+      </div>
+      <div class="field" id="scanAnchorDateWrap" style="display:none;">
+        <label for="scanAnchorDate">自定义日期</label>
+        <input id="scanAnchorDate" type="date" onchange="updateScanAnchorHint()" />
+      </div>
+      <div class="field" id="scanAnchorTimeWrap" style="display:none;">
+        <label for="scanAnchorTime">自定义时间</label>
+        <input id="scanAnchorTime" type="time" step="60" onchange="updateScanAnchorHint()" />
+      </div>
+      <div id="scanAnchorHint" class="hintBox" style="grid-column:1 / -1;display:none;"></div>
+      <div class="field">
         <label for="scanBoardFilter">板块筛选</label>
         <select id="scanBoardFilter">
           <option value="all" selected>全部</option>
@@ -654,6 +670,7 @@ function downloadTextFile(content, filename, mimeType){
 function buildScanExportMeta(scan){
   return [
     ['扫描时间', scan.scan_time || ''],
+    ['扫描时点', scan.scan_anchor_label || '当前最新收盘口径'],
     ['模式', scan.mode_label || scan.mode || ''],
     ['范围', scan.industry || ''],
     ['板块筛选', scan.board_filter_label || '全部'],
@@ -663,7 +680,8 @@ function buildScanExportMeta(scan){
     ['筛选后样本池', scan.filtered_universe ?? ''],
     ['请求样本数', scan.requested ?? ''],
     ['成功', scan.success ?? ''],
-    ['失败', scan.failed ?? '']
+    ['失败', scan.failed ?? ''],
+    ['备注', (scan.notes || []).join('；')]
   ];
 }
 function buildScanExportRows(scan){
@@ -854,6 +872,45 @@ function setSegment(groupId, inputId, value){
   }
 }
 
+function getLocalTodayStr(){
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function setDefaultScanAnchor(){
+  const now = new Date();
+  document.getElementById('scanAnchorDate').value = getLocalTodayStr();
+  document.getElementById('scanAnchorTime').value = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+}
+
+function updateScanAnchorHint(){
+  const useCurrent = document.getElementById('scanUseCurrentTime').checked;
+  const hint = document.getElementById('scanAnchorHint');
+  if (!hint) return;
+  if (useCurrent) {
+    hint.style.display = 'none';
+    hint.innerText = '';
+    return;
+  }
+  const date = document.getElementById('scanAnchorDate').value || getLocalTodayStr();
+  const time = document.getElementById('scanAnchorTime').value || '15:00';
+  const isToday = date === getLocalTodayStr();
+  hint.style.display = 'block';
+  hint.innerText = isToday
+    ? `当前设定：${date} ${time}。若落在今天交易时段，会按该时点前的分时数据估算当日K线。`
+    : `当前设定：${date} ${time}。历史日期先按该日收盘口径回看，时间暂不参与历史分钟级回放。`;
+}
+
+function toggleScanAnchorMode(){
+  const useCurrent = document.getElementById('scanUseCurrentTime').checked;
+  document.getElementById('scanAnchorDateWrap').style.display = useCurrent ? 'none' : 'block';
+  document.getElementById('scanAnchorTimeWrap').style.display = useCurrent ? 'none' : 'block';
+  updateScanAnchorHint();
+}
+
 function toggleScanMode(){
   const mode = document.getElementById('scanMode').value;
   const candidateMode = document.getElementById('scanCandidateMode')?.value || 'turnover_priority';
@@ -1023,21 +1080,26 @@ async function loadSectors(){
 function renderScanResult(d){
   latestScanResponse = d;
   const rows = d.top || [];
+  const noteHtml = (d.notes || []).length
+    ? `<div class="hintBox" style="margin-top:10px;">${(d.notes || []).map(item => escapeHtml(item)).join('<br>')}</div>`
+    : '';
   if (!rows.length) {
-    document.getElementById('scanResult').innerText = `没有可用结果（范围：${d.industry}，板块筛选：${d.board_filter_label || '全部'}）`;
+    document.getElementById('scanResult').innerHTML = `${noteHtml}<div style="margin-top:${(d.notes || []).length ? '10px' : '0'};">没有可用结果（范围：${escapeHtml(d.industry || '')}，板块筛选：${escapeHtml(d.board_filter_label || '全部')}）</div>`;
     return;
   }
 
   document.getElementById('scanResult').innerHTML = `
     <div class="statusStrip">
       <span>范围：${escapeHtml(d.industry)}</span>
+      <span>扫描时点：${escapeHtml(d.scan_anchor_label || '当前最新收盘口径')}</span>
       <span>板块筛选：${escapeHtml(d.board_filter_label || '全部')}</span>
       ${d.mode === 'all' ? `<span>候选生成：${escapeHtml(d.candidate_mode_label || d.candidate_mode || '-')}</span>` : ''}
       ${d.mode === 'all' && d.candidate_mode === 'random_sample' ? `<span>随机种子：${escapeHtml(d.random_seed ?? '-')}</span>` : ''}
       <span>排序：${escapeHtml(d.sort_by_label || d.sort_by || '')}</span>
-      <span>时间：${escapeHtml(d.scan_time || '-')}</span>
+      <span>执行时间：${escapeHtml(d.scan_time || '-')}</span>
     </div>
     <div class="muted" style="margin-top:8px;">筛选后样本池：${d.filtered_universe ?? '-'} ｜ 请求 ${d.requested} ｜ 成功 ${d.success} ｜ 失败 ${d.failed}</div>
+    ${noteHtml}
     <div class="tableWrap" style="margin-top:10px;">
       <table>
         <thead>
@@ -1136,6 +1198,9 @@ async function runScan(){
   const limit = document.getElementById('scanLimit').value;
   const sortBy = document.getElementById('scanSortBy').value;
   const days = document.getElementById('days').value;
+  const useCurrent = document.getElementById('scanUseCurrentTime').checked;
+  const scanDate = document.getElementById('scanAnchorDate').value;
+  const scanTime = document.getElementById('scanAnchorTime').value;
 
   const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days, board_filter: boardFilter });
   if (mode === 'all') {
@@ -1143,6 +1208,10 @@ async function runScan(){
     if (candidateMode === 'random_sample') params.set('random_seed', randomSeed || '42');
   }
   if (mode === 'industry') params.set('industry', industry);
+  if (!useCurrent) {
+    if (scanDate) params.set('scan_date', scanDate);
+    if (scanTime) params.set('scan_time', scanTime);
+  }
 
   if (candidateMode === 'full_universe') {
     params.set('async', '1');
@@ -1428,9 +1497,11 @@ async function runBacktest(){
   }, { responsive: true });
 }
 
+setDefaultScanAnchor();
 loadOverview();
 loadSectors();
 toggleScanMode();
+toggleScanAnchorMode();
 toggleBacktestControls();
 setBacktestDefaults();
 updateBacktestDataSourceHint();
