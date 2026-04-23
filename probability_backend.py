@@ -24,6 +24,33 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 
+DEFAULT_PROB_MODEL = "rule_basic"
+PROBABILITY_MODEL_LABELS = {
+    "rule_basic": "基础规则模型",
+    "rule_no_chase": "低追高倾向模型",
+    "dl_default": "DL 默认模型",
+}
+
+
+def get_probability_model_options() -> List[Dict[str, str]]:
+    return [
+        {"value": key, "label": PROBABILITY_MODEL_LABELS[key]}
+        for key in ("rule_basic", "rule_no_chase")
+    ]
+
+
+def get_probability_model_label(model_name: Optional[str]) -> str:
+    key = str(model_name or "").strip().lower()
+    return PROBABILITY_MODEL_LABELS.get(key, PROBABILITY_MODEL_LABELS[DEFAULT_PROB_MODEL])
+
+
+def _resolve_requested_prob_model(requested: Optional[str]) -> str:
+    key = str(requested or DEFAULT_PROB_MODEL).strip().lower()
+    if key not in {"rule_basic", "rule_no_chase"}:
+        return DEFAULT_PROB_MODEL
+    return key
+
+
 def _config_candidates() -> Tuple[str, ...]:
     base = os.path.dirname(os.path.abspath(__file__))
     return (
@@ -63,15 +90,24 @@ def _sigmoid(x: float) -> float:
 class RuleProbabilityBackend:
     name = "rule"
 
+    def __init__(self, model_name: Optional[str] = None):
+        self.model_name = _resolve_requested_prob_model(model_name)
+
+    def _neutral_result(self, reason: str) -> Dict[str, Any]:
+        return {
+            "p_up_today": 0.50,
+            "p_up_5d": 0.50,
+            "p_up_long": 0.50,
+            "reasons": [reason],
+            "features": {
+                "prob_model": self.model_name,
+                "prob_model_label": get_probability_model_label(self.model_name),
+            },
+        }
+
     def predict(self, daily_df: pd.DataFrame) -> Dict[str, Any]:
         if daily_df is None or len(daily_df) < 30:
-            return {
-                "p_up_today": 0.50,
-                "p_up_5d": 0.50,
-                "p_up_long": 0.50,
-                "reasons": ["历史样本较少，采用中性先验概率。"],
-                "features": {},
-            }
+            return self._neutral_result("历史样本较少，采用中性先验概率。")
 
         d = daily_df.copy()
         if "volume" not in d.columns:
@@ -84,22 +120,54 @@ class RuleProbabilityBackend:
         d["vol20"] = d["volume"].rolling(20).mean()
 
         last = d.iloc[-1]
-        momentum = (last["close"] / d["close"].iloc[-6]) - 1 if len(d) >= 6 else 0
+        close = float(last["close"])
+        momentum = (close / d["close"].iloc[-6]) - 1 if len(d) >= 6 and d["close"].iloc[-6] else 0.0
         ma_bias = (
-            (last["ma5"] - last["ma20"]) / last["ma20"]
-            if pd.notna(last["ma5"]) and pd.notna(last["ma20"]) and last["ma20"]
-            else 0
+            (float(last["ma5"]) - float(last["ma20"])) / float(last["ma20"])
+            if pd.notna(last["ma5"]) and pd.notna(last["ma20"]) and float(last["ma20"]) != 0
+            else 0.0
         )
         vol_ratio = (
-            (last["vol5"] / last["vol20"])
-            if pd.notna(last["vol5"]) and pd.notna(last["vol20"]) and last["vol20"]
-            else 1
+            float(last["vol5"]) / float(last["vol20"])
+            if pd.notna(last["vol5"]) and pd.notna(last["vol20"]) and float(last["vol20"]) != 0
+            else 1.0
         )
-        recent_win = (d["ret1"].tail(10) > 0).mean()
+        recent_win = float((d["ret1"].tail(10) > 0).mean())
+        max20 = float(d["close"].tail(20).max()) if not d["close"].tail(20).empty else close
+        max60 = float(d["close"].tail(60).max()) if not d["close"].tail(60).empty else close
+        dist_to_high_20 = close / max20 if max20 > 0 else 1.0
+        dist_to_high_60 = close / max60 if max60 > 0 else 1.0
+        ret_10d = (close / d["close"].iloc[-11]) - 1 if len(d) >= 11 and d["close"].iloc[-11] else 0.0
+        ma20_gap = (
+            (close / float(last["ma20"])) - 1
+            if pd.notna(last["ma20"]) and float(last["ma20"]) != 0
+            else 0.0
+        )
 
         score_today = 0.35 * momentum + 0.45 * ma_bias + 0.15 * (vol_ratio - 1) + 0.25 * (recent_win - 0.5)
         score_5d = 0.45 * momentum + 0.55 * ma_bias + 0.20 * (vol_ratio - 1) + 0.35 * (recent_win - 0.5)
         score_long = 0.25 * momentum + 0.70 * ma_bias + 0.10 * (vol_ratio - 1) + 0.20 * (recent_win - 0.5)
+
+        chase_penalty = 0.0
+        penalty_reason = "基础规则评分。"
+        if self.model_name == "rule_no_chase":
+            high20_penalty = max(0.0, (dist_to_high_20 - 0.97) / 0.03)
+            high60_penalty = max(0.0, (dist_to_high_60 - 0.92) / 0.08)
+            ret10_penalty = max(0.0, (ret_10d - 0.10) / 0.10)
+            ma20_gap_penalty = max(0.0, (ma20_gap - 0.08) / 0.08)
+            chase_penalty = (
+                0.12 * high20_penalty
+                + 0.08 * high60_penalty
+                + 0.10 * ret10_penalty
+                + 0.10 * ma20_gap_penalty
+            )
+            score_today -= chase_penalty
+            score_5d -= chase_penalty * 0.85
+            score_long -= chase_penalty * 0.50
+            if chase_penalty > 0:
+                penalty_reason = f"触发高位抑制，综合惩罚系数 {chase_penalty:.3f}。"
+            else:
+                penalty_reason = "未触发明显追高抑制，仍按偏谨慎规则评分。"
 
         p_today = _clamp_prob(_sigmoid(score_today))
         p_5d = _clamp_prob(_sigmoid(score_5d))
@@ -110,16 +178,25 @@ class RuleProbabilityBackend:
             "p_up_5d": p_5d,
             "p_up_long": p_long,
             "reasons": [
+                f"模型：{get_probability_model_label(self.model_name)}",
+                penalty_reason,
                 f"短期动量（近5日）为 {momentum * 100:.2f}%",
                 f"均线结构（MA5-MA20）偏离 {ma_bias * 100:.2f}%",
                 f"量能比（VOL5/VOL20）为 {vol_ratio:.2f}",
                 f"近10日上涨胜率 {recent_win * 100:.1f}%",
             ],
             "features": {
+                "prob_model": self.model_name,
+                "prob_model_label": get_probability_model_label(self.model_name),
                 "momentum_5d": round(momentum * 100, 2),
                 "ma_bias_pct": round(ma_bias * 100, 2),
                 "vol_ratio": round(vol_ratio, 2),
                 "win_rate_10d": round(recent_win * 100, 1),
+                "dist_to_20d_high": round(dist_to_high_20, 4),
+                "dist_to_60d_high": round(dist_to_high_60, 4),
+                "ret_10d_pct": round(ret_10d * 100, 2),
+                "ma20_gap_pct": round(ma20_gap * 100, 2),
+                "chase_penalty": round(chase_penalty, 4),
             },
         }
 
@@ -225,21 +302,29 @@ def _resolve_requested_backend(requested: Optional[str]) -> str:
     return mode
 
 
-def _choose_backend(mode: str) -> Tuple[str, Any, DLProbabilityBackend]:
-    rule = RuleProbabilityBackend()
+def _choose_backend(mode: str, prob_model: Optional[str] = None) -> Tuple[str, Any, DLProbabilityBackend, str]:
+    resolved_prob_model = _resolve_requested_prob_model(prob_model)
+    rule = RuleProbabilityBackend(model_name=resolved_prob_model)
     dl = DLProbabilityBackend()
 
     if mode == "rule":
-        return mode, rule, dl
+        return mode, rule, dl, resolved_prob_model
     if mode == "dl":
-        return mode, dl, dl
-    # auto
+        return mode, dl, dl, resolved_prob_model
     if dl.available:
-        return mode, dl, dl
-    return mode, rule, dl
+        return mode, dl, dl, resolved_prob_model
+    return mode, rule, dl, resolved_prob_model
 
 
-def _attach_meta(out: Dict[str, Any], backend: str, requested: str, fallback: bool, error: str = "") -> Dict[str, Any]:
+def _attach_meta(
+    out: Dict[str, Any],
+    backend: str,
+    requested: str,
+    fallback: bool,
+    prob_model: str,
+    prob_model_requested: str,
+    error: str = "",
+) -> Dict[str, Any]:
     out = dict(out)
     out.update(
         {
@@ -247,6 +332,10 @@ def _attach_meta(out: Dict[str, Any], backend: str, requested: str, fallback: bo
             "backend_requested": requested,
             "backend_fallback": bool(fallback),
             "backend_error": error or "",
+            "prob_model": prob_model,
+            "prob_model_label": get_probability_model_label(prob_model),
+            "prob_model_requested": prob_model_requested,
+            "prob_model_requested_label": get_probability_model_label(prob_model_requested),
         }
     )
     return out
@@ -255,57 +344,94 @@ def _attach_meta(out: Dict[str, Any], backend: str, requested: str, fallback: bo
 def predict_probability(
     daily_df: pd.DataFrame,
     backend: Optional[str] = None,
+    prob_model: Optional[str] = None,
     allow_fallback: bool = True,
 ) -> Dict[str, Any]:
     mode = _resolve_requested_backend(backend)
-    requested_mode, chosen_backend, _dl_backend = _choose_backend(mode)
+    requested_mode, chosen_backend, _dl_backend, requested_prob_model = _choose_backend(mode, prob_model)
+    selected_prob_model = getattr(chosen_backend, "model_name", "dl_default") if chosen_backend.name == "rule" else "dl_default"
 
     try:
         out = chosen_backend.predict(daily_df)
-        return _attach_meta(out, backend=chosen_backend.name, requested=requested_mode, fallback=False)
+        return _attach_meta(
+            out,
+            backend=chosen_backend.name,
+            requested=requested_mode,
+            fallback=False,
+            prob_model=selected_prob_model,
+            prob_model_requested=requested_prob_model,
+        )
     except Exception as e:
         if allow_fallback and chosen_backend.name != "rule":
-            rule = RuleProbabilityBackend()
+            rule = RuleProbabilityBackend(model_name=requested_prob_model)
             out = rule.predict(daily_df)
             out["reasons"] = [f"DL 后端不可用，已回退 rule：{e}"] + list(out.get("reasons", []))
-            return _attach_meta(out, backend="rule", requested=requested_mode, fallback=True, error=str(e))
+            return _attach_meta(
+                out,
+                backend="rule",
+                requested=requested_mode,
+                fallback=True,
+                prob_model=rule.model_name,
+                prob_model_requested=requested_prob_model,
+                error=str(e),
+            )
         raise
 
 
 def predict_probability_batch(
     daily_dfs: Sequence[pd.DataFrame],
     backend: Optional[str] = None,
+    prob_model: Optional[str] = None,
     allow_fallback: bool = True,
 ) -> List[Dict[str, Any]]:
     mode = _resolve_requested_backend(backend)
-    requested_mode, chosen_backend, _dl_backend = _choose_backend(mode)
+    requested_mode, chosen_backend, _dl_backend, requested_prob_model = _choose_backend(mode, prob_model)
 
     daily_dfs = list(daily_dfs)
     if not daily_dfs:
         return []
 
+    selected_prob_model = getattr(chosen_backend, "model_name", "dl_default") if chosen_backend.name == "rule" else "dl_default"
+
     try:
         raw_list = chosen_backend.predict_batch(daily_dfs)
         return [
-            _attach_meta(item, backend=chosen_backend.name, requested=requested_mode, fallback=False)
+            _attach_meta(
+                item,
+                backend=chosen_backend.name,
+                requested=requested_mode,
+                fallback=False,
+                prob_model=selected_prob_model,
+                prob_model_requested=requested_prob_model,
+            )
             for item in raw_list
         ]
     except Exception as e:
         if allow_fallback and chosen_backend.name != "rule":
-            rule = RuleProbabilityBackend()
+            rule = RuleProbabilityBackend(model_name=requested_prob_model)
             raw_list = rule.predict_batch(daily_dfs)
             out = []
             for item in raw_list:
                 item = dict(item)
                 item["reasons"] = [f"DL 后端不可用，已回退 rule：{e}"] + list(item.get("reasons", []))
-                out.append(_attach_meta(item, backend="rule", requested=requested_mode, fallback=True, error=str(e)))
+                out.append(
+                    _attach_meta(
+                        item,
+                        backend="rule",
+                        requested=requested_mode,
+                        fallback=True,
+                        prob_model=rule.model_name,
+                        prob_model_requested=requested_prob_model,
+                        error=str(e),
+                    )
+                )
             return out
         raise
 
 
 def get_backend_runtime_status(requested: Optional[str] = None) -> Dict[str, Any]:
     mode = _resolve_requested_backend(requested)
-    _, chosen_backend, dl_backend = _choose_backend(mode)
+    _, chosen_backend, dl_backend, _ = _choose_backend(mode)
 
     selected_pre_fallback = chosen_backend.name
     selected_with_fallback = selected_pre_fallback

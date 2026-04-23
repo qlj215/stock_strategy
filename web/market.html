@@ -270,6 +270,13 @@
           <option value="240">240日</option>
         </select>
       </div>
+      <div class="field">
+        <label for="probModel">概率模型</label>
+        <select id="probModel">
+          <option value="rule_basic" selected>基础规则模型</option>
+          <option value="rule_no_chase">低追高倾向模型</option>
+        </select>
+      </div>
       <div class="field" style="display:flex;align-items:flex-end;gap:10px;">
         <button onclick="loadOverview()">刷新看板</button>
         <button class="secondary" onclick="loadCodex()">Codex 长思考理由</button>
@@ -373,6 +380,13 @@
           <option value="long_up">长期上涨概率</option>
           <option value="pct">当日涨跌幅</option>
           <option value="turnover">成交额</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="scanProbModel">概率模型</label>
+        <select id="scanProbModel">
+          <option value="rule_basic" selected>基础规则模型</option>
+          <option value="rule_no_chase">低追高倾向模型</option>
         </select>
       </div>
       <div class="field" style="display:flex;align-items:flex-end;gap:10px;">
@@ -581,7 +595,7 @@
 </div>
 
 <script>
-let state = { symbol: '000001', days: 60 };
+let state = { symbol: '000001', days: 60, prob_model: 'rule_basic' };
 let latestOverview = null;
 let latestSignalResponse = null;
 let latestScanResponse = null;
@@ -675,6 +689,7 @@ function buildScanExportMeta(scan){
     ['范围', scan.industry || ''],
     ['板块筛选', scan.board_filter_label || '全部'],
     ['候选生成', scan.candidate_mode_label || scan.candidate_mode || ''],
+    ['概率模型', scan.prob_model_label || scan.prob_model || ''],
     ['排序', scan.sort_by_label || scan.sort_by || ''],
     ['观察窗口', scan.days ? `${scan.days}日` : ''],
     ['筛选后样本池', scan.filtered_universe ?? ''],
@@ -964,13 +979,24 @@ function updateBacktestDataSourceHint(){
 async function loadOverview(){
   const symbol = document.getElementById('symbol').value.trim();
   const days = document.getElementById('days').value;
-  state = { symbol, days: Number(days) };
+  const probModel = document.getElementById('probModel').value || 'rule_basic';
+  state = { symbol, days: Number(days), prob_model: probModel };
 
-  const r = await fetch(`/api/market/overview?symbol=${encodeURIComponent(symbol)}&days=${encodeURIComponent(days)}`);
+  const params = new URLSearchParams({
+    symbol,
+    days,
+    prob_model: probModel
+  });
+  const r = await fetch('/api/market/overview?' + params.toString());
   const d = await r.json();
   if (d.error) return alert(d.error);
 
   latestOverview = d;
+  if ((d.prob_model_options || []).length) {
+    fillOptionObjects('probModel', d.prob_model_options);
+    fillOptionObjects('scanProbModel', d.prob_model_options);
+    document.getElementById('probModel').value = d.prediction?.prob_model_requested || d.prediction?.prob_model || probModel;
+  }
   if ((d.signal_presets || []).length) {
     fillOptionObjects('signalPreset', d.signal_presets);
   }
@@ -1010,6 +1036,7 @@ async function loadOverview(){
       </div>
     </div>
     <div class="statusStrip">
+      <span>概率模型：<b>${escapeHtml(p.prob_model_label || p.prob_model || '-')}</b></span>
       <span>当日上涨概率：<b>${pct(p.today_up)}</b></span>
       <span>5日上涨概率：<b>${pct(p.next_5d_up)}</b></span>
       <span>长期上涨概率：<b>${pct(p.long_up)}</b></span>
@@ -1051,10 +1078,17 @@ async function loadCodex(){
   document.getElementById('codex').style.display = 'block';
   document.getElementById('codexText').innerText = 'Codex 分析中，请稍候...';
 
+  const payload = {
+    symbol: document.getElementById('symbol').value.trim(),
+    days: Number(document.getElementById('days').value),
+    prob_model: document.getElementById('probModel').value || 'rule_basic'
+  };
+  state = payload;
+
   const r = await fetch('/api/market/codex_reason', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(state)
+    body: JSON.stringify(payload)
   });
   const d = await r.json();
   if (d.error) {
@@ -1093,6 +1127,7 @@ function renderScanResult(d){
       <span>范围：${escapeHtml(d.industry)}</span>
       <span>扫描时点：${escapeHtml(d.scan_anchor_label || '当前最新收盘口径')}</span>
       <span>板块筛选：${escapeHtml(d.board_filter_label || '全部')}</span>
+      <span>概率模型：${escapeHtml(d.prob_model_label || d.prob_model || '-')}</span>
       ${d.mode === 'all' ? `<span>候选生成：${escapeHtml(d.candidate_mode_label || d.candidate_mode || '-')}</span>` : ''}
       ${d.mode === 'all' && d.candidate_mode === 'random_sample' ? `<span>随机种子：${escapeHtml(d.random_seed ?? '-')}</span>` : ''}
       <span>排序：${escapeHtml(d.sort_by_label || d.sort_by || '')}</span>
@@ -1197,12 +1232,13 @@ async function runScan(){
   const randomSeed = document.getElementById('scanRandomSeed').value;
   const limit = document.getElementById('scanLimit').value;
   const sortBy = document.getElementById('scanSortBy').value;
+  const probModel = document.getElementById('scanProbModel').value || 'rule_basic';
   const days = document.getElementById('days').value;
   const useCurrent = document.getElementById('scanUseCurrentTime').checked;
   const scanDate = document.getElementById('scanAnchorDate').value;
   const scanTime = document.getElementById('scanAnchorTime').value;
 
-  const params = new URLSearchParams({ mode, limit, sort_by: sortBy, days, board_filter: boardFilter });
+  const params = new URLSearchParams({ mode, limit, sort_by: sortBy, prob_model: probModel, days, board_filter: boardFilter });
   if (mode === 'all') {
     params.set('candidate_mode', candidateMode);
     if (candidateMode === 'random_sample') params.set('random_seed', randomSeed || '42');

@@ -28,6 +28,8 @@ from stock_strategy.probability_backend import (
     predict_probability,
     predict_probability_batch,
     get_backend_runtime_status,
+    get_probability_model_label,
+    get_probability_model_options,
 )
 
 app = Flask(__name__, static_folder="web", static_url_path="")
@@ -691,9 +693,9 @@ def replay_codex_status(job_id):
     return jsonify(REPLAY_JOBS[job_id])
 
 
-def _probability_model(daily_df: pd.DataFrame, backend: str | None = None) -> Dict:
-    """统一概率预测入口：支持 rule / dl / auto 后端切换。"""
-    return predict_probability(daily_df, backend=backend, allow_fallback=True)
+def _probability_model(daily_df: pd.DataFrame, backend: str | None = None, prob_model: str | None = None) -> Dict:
+    """统一概率预测入口：支持 backend 切换，并允许选择规则概率模型。"""
+    return predict_probability(daily_df, backend=backend, prob_model=prob_model, allow_fallback=True)
 
 
 def _build_market_codex_prompt(symbol: str, daily_df: pd.DataFrame, intraday_df: pd.DataFrame, model_result: Dict) -> str:
@@ -712,6 +714,7 @@ def _build_market_codex_prompt(symbol: str, daily_df: pd.DataFrame, intraday_df:
     return f"""你是A股交易研究员。请结合以下量价数据，对 {symbol} 给出当日、5日、长期（3-6月）上涨概率的分析理由。
 
 模型先验概率：
+- 概率模型: {model_result.get('prob_model_label', model_result.get('prob_model', '未知模型'))}
 - 当日上涨概率: {model_result['p_up_today']:.2%}
 - 5日上涨概率: {model_result['p_up_5d']:.2%}
 - 长期上涨概率: {model_result['p_up_long']:.2%}
@@ -769,6 +772,7 @@ def market_overview():
     days = int(request.args.get("days", "60"))
     days = max(20, min(days, 250))
     backend = (request.args.get("backend") or "").strip() or None
+    prob_model = (request.args.get("prob_model") or "").strip() or None
 
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
@@ -782,7 +786,7 @@ def market_overview():
         intraday = _intraday_from_fetcher(symbol, count=240)
         daily, intraday_estimation = _merge_today_estimated_bar(daily, intraday)
 
-        model_result = _probability_model(daily, backend=backend)
+        model_result = _probability_model(daily, backend=backend, prob_model=prob_model)
         latest = daily.iloc[-1]
 
         return jsonify({
@@ -825,8 +829,13 @@ def market_overview():
                 "backend_requested": model_result.get("backend_requested", backend or "rule"),
                 "backend_fallback": bool(model_result.get("backend_fallback", False)),
                 "backend_error": model_result.get("backend_error", ""),
+                "prob_model": model_result.get("prob_model", "rule_basic"),
+                "prob_model_label": model_result.get("prob_model_label", get_probability_model_label(prob_model)),
+                "prob_model_requested": model_result.get("prob_model_requested", prob_model or "rule_basic"),
+                "prob_model_requested_label": model_result.get("prob_model_requested_label", get_probability_model_label(prob_model)),
             },
             "intraday_estimation": intraday_estimation,
+            "prob_model_options": get_probability_model_options(),
             "signal_presets": [
                 {"value": key, "label": label}
                 for key, label in REALTIME_SIGNAL_PRESET_LABELS.items()
@@ -878,6 +887,7 @@ def market_codex_reason():
     days = int(data.get("days", 60))
     days = max(20, min(days, 250))
     backend = (data.get("backend") or "").strip() or None
+    prob_model = (data.get("prob_model") or "").strip() or None
 
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days * 2 + 20)).strftime("%Y%m%d")
@@ -889,7 +899,7 @@ def market_codex_reason():
 
     intraday = _intraday_from_fetcher(symbol, count=240)
     daily, _ = _merge_today_estimated_bar(daily, intraday)
-    model_result = _probability_model(daily, backend=backend)
+    model_result = _probability_model(daily, backend=backend, prob_model=prob_model)
 
     analysis, err = _run_market_codex_reason(symbol, daily, intraday, model_result)
     if err:
@@ -901,6 +911,8 @@ def market_codex_reason():
         "backend": model_result.get("backend", "rule"),
         "backend_requested": model_result.get("backend_requested", backend or "rule"),
         "backend_fallback": bool(model_result.get("backend_fallback", False)),
+        "prob_model": model_result.get("prob_model", "rule_basic"),
+        "prob_model_label": model_result.get("prob_model_label", get_probability_model_label(prob_model)),
     })
 
 
@@ -912,7 +924,7 @@ def _to_float(v, default=0.0):
         return default
 
 
-def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = None, anchor_dt: Any = None) -> Dict:
+def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = None, prob_model: str | None = None, anchor_dt: Any = None) -> Dict:
     anchor_ts = pd.Timestamp(anchor_dt) if anchor_dt is not None else pd.Timestamp.now()
     anchor_ts = anchor_ts.floor("min")
     anchor_day = anchor_ts.normalize()
@@ -935,7 +947,7 @@ def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = Non
             if not intra.empty:
                 daily, intraday_estimation = _merge_today_estimated_bar(daily, intra)
 
-    pred = _probability_model(daily, backend=backend)
+    pred = _probability_model(daily, backend=backend, prob_model=prob_model)
     latest = daily.iloc[-1]
 
     return {
@@ -949,6 +961,8 @@ def _calc_symbol_snapshot(symbol: str, days: int = 60, backend: str | None = Non
         "long_up": round(pred["p_up_long"], 4),
         "model_backend": pred.get("backend", "rule"),
         "model_backend_fallback": bool(pred.get("backend_fallback", False)),
+        "prob_model": pred.get("prob_model", "rule_basic"),
+        "prob_model_label": pred.get("prob_model_label", get_probability_model_label(prob_model)),
         "snapshot_date": latest.get("date").strftime("%Y-%m-%d") if pd.notna(latest.get("date")) else "",
         "intraday_estimation_applied": bool((intraday_estimation or {}).get("applied", False)),
     }
@@ -1028,7 +1042,7 @@ def _build_scan_anchor_label(anchor_ts: pd.Timestamp, is_custom: bool) -> str:
     return "当前最新收盘口径"
 
 
-def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filter: str, sort_by: str, days: int, backend: str | None, candidate_mode: str, filtered_universe: int, scan_anchor_label: str, scan_anchor_meta: Dict[str, Any], notes: List[str]) -> Dict[str, Any]:
+def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filter: str, sort_by: str, days: int, backend: str | None, prob_model: str | None, candidate_mode: str, filtered_universe: int, scan_anchor_label: str, scan_anchor_meta: Dict[str, Any], notes: List[str]) -> Dict[str, Any]:
     return {
         "mode": mode,
         "mode_label": "行业内对比" if mode == "industry" else f"全A股遍历（{SCAN_CANDIDATE_MODE_LABELS[candidate_mode]}）",
@@ -1050,11 +1064,13 @@ def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filte
         "scan_anchor_meta": scan_anchor_meta,
         "notes": list(notes or []),
         "model_backend": get_backend_runtime_status(backend),
+        "prob_model": prob_model or "rule_basic",
+        "prob_model_label": get_probability_model_label(prob_model),
         "top": [],
     }
 
 
-def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: str, days: int, limit: int, backend: str | None, candidate_mode: str, random_seed: int, scan_date: str = "", scan_time: str = "", job_id: str | None = None) -> Dict[str, Any]:
+def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: str, days: int, limit: int, backend: str | None, prob_model: str | None, candidate_mode: str, random_seed: int, scan_date: str = "", scan_time: str = "", job_id: str | None = None) -> Dict[str, Any]:
     symbols = []
     names_map = {}
     snapshots = {}
@@ -1100,7 +1116,7 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
         all_symbols = _apply_board_filter(all_symbols, board_filter)
         filtered_universe = len(all_symbols)
         if not all_symbols:
-            return _scan_empty_result(mode, industry, sector_source, board_filter, sort_by, days, backend, effective_candidate_mode, filtered_universe, scan_anchor_label, scan_anchor_meta, notes)
+            return _scan_empty_result(mode, industry, sector_source, board_filter, sort_by, days, backend, prob_model, effective_candidate_mode, filtered_universe, scan_anchor_label, scan_anchor_meta, notes)
 
         if effective_candidate_mode == "turnover_priority" and scan_anchor_meta.get("is_custom"):
             effective_candidate_mode = "full_order"
@@ -1136,7 +1152,7 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
                 "current_symbol": s,
             })
         try:
-            item = _calc_symbol_snapshot(s, days=days, backend=backend, anchor_dt=anchor_ts)
+            item = _calc_symbol_snapshot(s, days=days, backend=backend, prob_model=prob_model, anchor_dt=anchor_ts)
             if not item:
                 failed.append(s)
                 continue
@@ -1173,6 +1189,8 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
         "industry": industry if mode == "industry" else "全A股",
         "sector_source": sector_source,
         "model_backend": get_backend_runtime_status(backend),
+        "prob_model": rows[0].get("prob_model", prob_model or "rule_basic") if rows else (prob_model or "rule_basic"),
+        "prob_model_label": rows[0].get("prob_model_label", get_probability_model_label(prob_model)) if rows else get_probability_model_label(prob_model),
         "days": days,
         "sort_by": sort_by,
         "sort_by_label": SCAN_SORT_LABELS.get(sort_by, sort_by),
@@ -1228,6 +1246,7 @@ def market_scan():
     days = max(20, min(int(request.args.get("days", "60")), 250))
     limit = max(1, min(int(request.args.get("limit", "30")), 400))
     backend = (request.args.get("backend") or "").strip() or None
+    prob_model = (request.args.get("prob_model") or "").strip() or None
     candidate_mode = (request.args.get("candidate_mode") or "turnover_priority").strip()
     random_seed = int(request.args.get("random_seed", "42") or 42)
     scan_date = (request.args.get("scan_date") or "").strip()
@@ -1248,6 +1267,7 @@ def market_scan():
         "days": days,
         "limit": limit,
         "backend": backend,
+        "prob_model": prob_model,
         "candidate_mode": candidate_mode,
         "random_seed": random_seed,
         "scan_date": scan_date,
