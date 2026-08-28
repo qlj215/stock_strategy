@@ -107,7 +107,11 @@ def _ensure_daily_df(daily_df: pd.DataFrame) -> pd.DataFrame:
     if "date" in d.columns:
         d["date"] = pd.to_datetime(d["date"], errors="coerce")
     else:
-        d = d.reset_index().rename(columns={d.index.name or d.columns[0]: "date"})
+        # reset_index 后的首列即原索引列，把它当日期；
+        # 旧写法会误改首条行情列（如 open -> date），造成特征错乱
+        d = d.reset_index()
+        if "date" not in d.columns:
+            d = d.rename(columns={d.columns[0]: "date"})
         d["date"] = pd.to_datetime(d["date"], errors="coerce")
 
     if "close" not in d.columns:
@@ -294,8 +298,10 @@ def _train_bootstrap_model(model_path: str) -> Dict[str, Any]:
         "input_dim": int(input_dim),
         "window": int(WINDOW),
         "feature_names": list(FEATURE_NAMES),
-        "mean": mean,
-        "std": std,
+        # 存 list 而非 numpy 数组，使 checkpoint 在 torch>=2.6
+        # 默认 weights_only=True 下也能直接加载
+        "mean": mean.tolist(),
+        "std": std.tolist(),
         "meta": {
             "trained_at": datetime.now().isoformat(),
             "epochs": epochs,
@@ -309,12 +315,26 @@ def _train_bootstrap_model(model_path: str) -> Dict[str, Any]:
     return ckpt
 
 
+def _torch_load_checkpoint(model_path: str) -> Dict[str, Any]:
+    """
+    加载本进程可信任的本地产 checkpoint。
+
+    torch >= 2.6 起 torch.load 默认 weights_only=True，会拒绝本 checkpoint
+    中的 numpy 数组字段（mean/std）；此处显式回退到 weights_only=False，
+    避免被误判为文件损坏而触发不必要的整轮 bootstrap 重训。
+    """
+    try:
+        return torch.load(model_path, map_location="cpu")
+    except Exception:
+        return torch.load(model_path, map_location="cpu", weights_only=False)
+
+
 def _load_checkpoint(model_path: str) -> Dict[str, Any]:
     if not os.path.exists(model_path):
         return _train_bootstrap_model(model_path)
 
     try:
-        ckpt = torch.load(model_path, map_location="cpu")
+        ckpt = _torch_load_checkpoint(model_path)
         if not isinstance(ckpt, dict):
             raise TypeError("checkpoint 结构非法")
         if "state_dict" not in ckpt:
