@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -209,12 +210,141 @@ def get_miniqmt_launch_status() -> Dict[str, Any]:
     return dict(_MINIQMT_LAUNCH_RESULT)
 
 
+# —— xtdata 连接就绪探测（端口候选 / 行情服务探活 / 连接诊断） ——
+_XT_READY = False
+_XT_READY_PORT: Optional[int] = None
+
+
+def _collect_xt_port_candidates() -> List[int]:
+    """收集 xtdata 可能使用的端口（环境变量/配置文件/常见默认端口）。"""
+    raw_ports: List[Any] = []
+
+    for key in ("XTDATA_PORT", "MINIQMT_XTDATA_PORT", "QMT_XTDATA_PORT"):
+        v = os.getenv(key)
+        if v:
+            raw_ports.append(v)
+
+    try:
+        cfg_root = os.path.join(os.path.expanduser("~"), ".xtquant")
+        if os.path.isdir(cfg_root):
+            for entry in os.scandir(cfg_root):
+                if not entry.is_dir():
+                    continue
+                cfg_path = os.path.join(entry.path, "xtdata.cfg")
+                if not os.path.exists(cfg_path):
+                    continue
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                    raw_ports.append(cfg.get("port"))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # 常见端口（58610 为官方默认；部分环境会落在 58600 一带）
+    raw_ports.extend([58610, 58600, 58611, 58612, 58620, 58630])
+
+    out: List[int] = []
+    seen = set()
+    for p in raw_ports:
+        try:
+            pi = int(p)
+        except Exception:
+            continue
+        if not (1 <= pi <= 65535):
+            continue
+        if pi in seen:
+            continue
+        seen.add(pi)
+        out.append(pi)
+    return out
+
+
+def _probe_xtdata_market_ready(xtdata) -> tuple[bool, str]:
+    """探测当前 xtdata 连接是否可用于行情读取。"""
+    try:
+        # 该接口在可用行情服务下应可返回（即便列表为空也不抛异常）
+        xtdata.get_sector_list()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _ensure_xtdata_ready(xtdata):
+    """确保 xtdata 已连接到可用的 MiniQMT 行情服务。"""
+    global _XT_READY, _XT_READY_PORT
+
+    if _XT_READY:
+        try:
+            client = xtdata.get_client()
+            if client and client.is_connected():
+                return
+        except Exception:
+            pass
+        _XT_READY = False
+        _XT_READY_PORT = None
+
+    attempts: List[str] = []
+
+    def _try_connect(port: Optional[int]):
+        if port is None:
+            client = xtdata.connect()
+            tag = "auto"
+        else:
+            client = xtdata.connect(port=int(port))
+            tag = str(port)
+        return client, tag
+
+    tried = set()
+    for port in [None] + _collect_xt_port_candidates():
+        tag = "auto" if port is None else str(port)
+        if tag in tried:
+            continue
+        tried.add(tag)
+
+        client = None
+        try:
+            client, tag = _try_connect(port)
+            ok, probe_err = _probe_xtdata_market_ready(xtdata)
+            if ok:
+                _XT_READY = True
+                _XT_READY_PORT = int(port) if port is not None else None
+                return
+            attempts.append(f"{tag}: {probe_err}")
+        except Exception as e:
+            attempts.append(f"{tag}: {e}")
+        finally:
+            if not _XT_READY and client is not None:
+                try:
+                    client.shutdown()
+                except Exception:
+                    pass
+
+    detail = " | ".join(attempts[:6])
+    market_unavailable = any(
+        ("200005" in a) or ("未找到对应数据源" in a) or ("未找到对应数据" in a)
+        for a in attempts
+    )
+
+    if market_unavailable:
+        raise RuntimeError(
+            "已连上 QMT 服务但行情数据源不可用。"
+            "请确认已启动 XtMiniQmt.exe 与 miniquote.exe（仅 XtItClient 不够）。"
+            f" 诊断信息: {detail}"
+        )
+
+    raise RuntimeError(
+        "未能连接 xtquant 行情服务，请确认 MiniQMT 已在线。"
+        "如端口非默认，可设置环境变量 XTDATA_PORT。"
+        f" 诊断信息: {detail}"
+    )
+
+
 def _load_xtdata():
     _launch_miniqmt_if_needed()
     try:
         from xtquant import xtdata  # type: ignore
-
-        return xtdata
     except Exception as e:
         launch_msg = ""
         if _MINIQMT_LAUNCH_RESULT.get("attempted"):
@@ -228,6 +358,9 @@ def _load_xtdata():
             "并确认 MiniQMT 客户端可用。"
             + launch_msg
         ) from e
+
+    _ensure_xtdata_ready(xtdata)
+    return xtdata
 
 
 def _to_xt_symbol(symbol: str) -> str:

@@ -1,13 +1,17 @@
 from datetime import datetime, timedelta
+import argparse
+import json
 import os
+import shutil
 import sys
 import random
+import time
 import uuid
 import subprocess
 import threading
 import re
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
@@ -125,6 +129,159 @@ BACKTEST_COST_DEFAULTS = {
     "transfer_fee_rate": 0.00001,
     "slippage_rate": 0.0,
 }
+
+
+def _is_windows() -> bool:
+    return os.name == "nt" or bool(os.environ.get("WINDIR")) or os.path.exists("/mnt/c/Windows")
+
+
+def _windows_powershell() -> str:
+    candidates = [
+        shutil.which("powershell.exe"),
+        "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    raise RuntimeError("未找到 powershell.exe，无法自动启动 MiniQMT。")
+
+
+def _qmt_bootstrap_script() -> str:
+    return r"""
+$ErrorActionPreference = 'Stop'
+
+function Find-Exe([string]$name){
+  $running = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.ProcessName -ieq [System.IO.Path]::GetFileNameWithoutExtension($name) } |
+    Select-Object -First 1
+
+  if($running){
+    try {
+      $p = $running.Path
+      if($p){ return $p }
+    } catch {}
+  }
+
+  $xtIt = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.ProcessName -ieq 'XtItClient' } |
+    Select-Object -First 1
+
+  if($xtIt){
+    try {
+      $dir = Split-Path -Parent $xtIt.Path
+      $cand = Join-Path $dir $name
+      if(Test-Path $cand){ return $cand }
+
+      $cand2 = Get-ChildItem -Path $dir -Filter $name -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+      if($cand2){ return $cand2.FullName }
+
+      $root = Split-Path -Parent $dir
+      $cand3 = Get-ChildItem -Path $root -Filter $name -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+      if($cand3){ return $cand3.FullName }
+    } catch {}
+  }
+
+  foreach($r in @($env:USERPROFILE, 'C:\Program Files', 'C:\Program Files (x86)')){
+    if(-not (Test-Path $r)){ continue }
+    $f = Get-ChildItem -Path $r -Filter $name -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if($f){ return $f.FullName }
+  }
+
+  return $null
+}
+
+$report = [ordered]@{}
+
+foreach($exe in @('XtMiniQmt.exe','miniquote.exe')){
+  $procName = [System.IO.Path]::GetFileNameWithoutExtension($exe)
+  $already = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.ProcessName -ieq $procName } |
+    Select-Object -First 1
+
+  if($already){
+    $report[$exe] = [ordered]@{ status='already_running'; pid=$already.Id; path=$already.Path }
+    continue
+  }
+
+  $path = Find-Exe $exe
+  if(-not $path){
+    $report[$exe] = [ordered]@{ status='not_found' }
+    continue
+  }
+
+  Start-Process -FilePath $path | Out-Null
+  Start-Sleep -Seconds 2
+
+  $started = Get-Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.ProcessName -ieq $procName } |
+    Select-Object -First 1
+
+  if($started){
+    $report[$exe] = [ordered]@{ status='started'; pid=$started.Id; path=$path }
+  } else {
+    $report[$exe] = [ordered]@{ status='launch_attempted_but_not_running'; path=$path }
+  }
+}
+
+$report | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+def ensure_qmt_processes_started(wait_seconds: float = 3.0) -> Dict[str, Dict[str, object]]:
+    if not _is_windows():
+        raise RuntimeError("当前环境不是 Windows/WSL，无法自动拉起 MiniQMT。")
+
+    ps = _windows_powershell()
+    cmd = [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", _qmt_bootstrap_script()]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"自动启动 MiniQMT 失败: {detail[:500]}")
+
+    output = (proc.stdout or "").strip()
+    if not output:
+        raise RuntimeError("自动启动 MiniQMT 失败: 未返回结果")
+
+    try:
+        data = json.loads(output)
+    except Exception as e:
+        raise RuntimeError(f"自动启动 MiniQMT 失败: 返回结果无法解析: {output[:300]}") from e
+
+    time.sleep(max(0.0, float(wait_seconds)))
+    return data
+
+
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="股票训练/看盘 Web 服务")
+    parser.add_argument("--host", default="0.0.0.0", help="Flask 监听地址")
+    parser.add_argument(
+        "--port", type=int, default=None,
+        help="Flask 监听端口；默认读环境变量 STOCK_STRATEGY_PORT，未设置时用 8789",
+    )
+    parser.add_argument("--debug", action="store_true", help="开启 Flask debug（默认关）")
+    parser.add_argument("--auto-start-qmt", action="store_true", help="启动前自动拉起 XtMiniQmt.exe 与 miniquote.exe")
+    parser.add_argument("--qmt-wait-seconds", type=float, default=3.0, help="自动启动 QMT 后额外等待秒数，默认 3")
+    return parser.parse_args(argv)
+
+
+def _resolve_port(args_port: Optional[int]) -> int:
+    if args_port is not None:
+        return int(args_port)
+    port_raw = os.getenv("STOCK_STRATEGY_PORT", "8789").strip()
+    try:
+        return int(port_raw)
+    except ValueError:
+        print(f"Invalid STOCK_STRATEGY_PORT={port_raw!r}, fallback to 8789", file=sys.stderr)
+        return 8789
+
+
+def _maybe_auto_start_qmt(args) -> Optional[Dict[str, Dict[str, object]]]:
+    if not getattr(args, "auto_start_qmt", False):
+        return None
+    result = ensure_qmt_processes_started(wait_seconds=args.qmt_wait_seconds)
+    print("[QMT] auto start result:", json.dumps(result, ensure_ascii=False))
+    return result
 
 
 def _today_str():
@@ -2654,10 +2811,6 @@ def market_backtest():
 
 
 if __name__ == "__main__":
-    port_raw = os.getenv("STOCK_STRATEGY_PORT", "8789").strip()
-    try:
-        port = int(port_raw)
-    except ValueError:
-        print(f"Invalid STOCK_STRATEGY_PORT={port_raw!r}, fallback to 8789", file=sys.stderr)
-        port = 8789
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    args = _parse_args()
+    _maybe_auto_start_qmt(args)
+    app.run(host=args.host, port=_resolve_port(args.port), debug=args.debug, use_reloader=False)
