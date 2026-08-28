@@ -349,6 +349,32 @@ def test_strategy_metrics_and_calibration():
     assert bins and sum(b["count"] for b in bins) == len(y)
 
 
+def test_legacy_backtest_branch():
+    import stock_strategy.trainer_app as ta
+
+    df = _synthetic_daily(300)
+    ta._daily_from_fetcher = lambda symbol, start, end, **k: df
+
+    args = {"symbol": "000001", "threshold": "0.5", "long_horizon": "40", "backend": ""}
+    assert ta._is_legacy_backtest_request(args) is True
+    assert ta._is_legacy_backtest_request({"symbol": "000001", "universe_mode": "manual"}) is False
+    assert ta._is_legacy_backtest_request({}) is False
+
+    with ta.app.test_request_context("/api/market/backtest?symbol=000001&start=20230101&end=20240101&threshold=0.5&long_horizon=40"):
+        from flask import request as flask_request
+
+        # 触发 legacy 分支的完整链路（分类指标 + 策略回测 + 校准分箱）
+        ta._daily_from_fetcher = lambda symbol, start, end, **k: df
+        try:
+            resp = ta._market_backtest_legacy()
+        except Exception as e:  # noqa: BLE001
+            raise AssertionError(f"legacy 回测链路异常: {e}")
+        payload = resp[0].get_json() if isinstance(resp, tuple) else resp.get_json()
+    assert payload.get("legacy_mode") is True
+    assert set(payload["classification"]) == {"d1", "d5", "long"}
+    assert payload["window"]["samples"] > 0
+
+
 def test_scan_core_offline():
     try:
         import pyarrow  # noqa: F401
@@ -507,6 +533,7 @@ def main() -> int:
     check("strategy_metrics_and_calibration", test_strategy_metrics_and_calibration)
     check("panel_backtest_rule_strategy", test_panel_backtest_rule_strategy)
     check("panel_backtest_model_strategy", test_panel_backtest_model_strategy)
+    check("legacy_backtest_branch", test_legacy_backtest_branch)
     check("scan_core_offline", test_scan_core_offline)
     check("whatif_calculator", test_whatif_calculator)
     check("feature_engineering", test_feature_engineering)

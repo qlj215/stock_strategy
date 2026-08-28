@@ -265,7 +265,17 @@ def _get_sector_registry(force_refresh: bool = False) -> Dict:
             "status": dict(SECTOR_CACHE.get("status", {})),
         }
 
-    status = get_sector_sync_status()
+    try:
+        status = get_sector_sync_status()
+    except Exception as e:
+        # MiniQMT/xtdata 不可用时继续走历史面板/本地池回退，而不是让行业功能整体 500
+        status = {
+            "base_sector_count": 0,
+            "dynamic_sector_available": False,
+            "dynamic_sector_rows": 0,
+            "dynamic_industry_count": 0,
+            "error": f"{type(e).__name__}: {e}",
+        }
     sectors = []
     source = "local_fallback"
 
@@ -1069,6 +1079,14 @@ def _scan_empty_result(mode: str, industry: str, sector_source: str, board_filte
     }
 
 
+def _safe_symbol_name(symbol: str) -> str:
+    """证券简称查询失败（如 MiniQMT 不可用）时返回空串，不让扫描整体失败。"""
+    try:
+        return get_symbol_name(symbol)
+    except Exception:
+        return ""
+
+
 def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: str, days: int, limit: int, backend: str | None, prob_model: str | None, candidate_mode: str, random_seed: int, scan_date: str = "", scan_time: str = "", job_id: str | None = None) -> Dict[str, Any]:
     symbols = []
     names_map = {}
@@ -1104,7 +1122,7 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
         symbols = _apply_board_filter(symbols, board_filter)
         filtered_universe = len(symbols)
         symbols = symbols[:limit]
-        names_map = {s: get_symbol_name(s) for s in symbols}
+        names_map = {s: _safe_symbol_name(s) for s in symbols}
 
     elif mode == "all":
         sector_source = "miniqmt_realtime"
@@ -1134,7 +1152,7 @@ def _run_market_scan_core(mode: str, industry: str, sort_by: str, board_filter: 
             symbols = list(all_symbols)
         else:
             symbols = list(all_symbols[:limit])
-        names_map = {s: get_symbol_name(s) for s in symbols}
+        names_map = {s: _safe_symbol_name(s) for s in symbols}
     else:
         raise ValueError("mode 仅支持 industry 或 all")
 
