@@ -26,6 +26,10 @@ _MINIQMT_LAUNCH_RESULT: Dict[str, Any] = {
     "detail": "",
     "already_running": False,
 }
+# 本进程内已落盘的缓存键，避免同参数重复拉取时反复写 CSV
+_CACHE_WRITTEN_KEYS: set = set()
+# 已建立的分钟行情订阅，避免重复 subscribe_quote
+_SUBSCRIBED_KEYS: set = set()
 
 
 def _is_wsl() -> bool:
@@ -326,6 +330,11 @@ def _normalize_xt_kline_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _daily_cache_key(plain_symbol: str, start_date: str, end_date: str, dividend_type: str) -> str:
+    # 复权口径会影响取值，纳入缓存键，避免不同 adjust 共用一个缓存文件
+    return f"{plain_symbol}_{start_date}_{end_date}_{dividend_type}"
+
+
 def fetch_stock_data(
     symbol: str,
     start_date: str,
@@ -340,11 +349,15 @@ def fetch_stock_data(
 
     返回格式与旧版保持一致：
     index=date, columns 至少包含 open/high/low/close/volume。
+
+    成功拉取后尽力写入一份 CSV 缓存（同参数本进程内只写一次，
+    写失败不影响返回），仅当 xtdata 不可用时回退读取。
     """
     xtdata = _load_xtdata()
     xt_symbol = _to_xt_symbol(symbol)
     plain_symbol = _to_plain_symbol(symbol)
     dividend_type = _map_adjust_to_dividend_type(adjust)
+    cache_key = _daily_cache_key(plain_symbol, start_date, end_date, dividend_type)
 
     last_err: Optional[Exception] = None
 
@@ -375,7 +388,12 @@ def fetch_stock_data(
                 raise ValueError("返回数据缺少 OHLCV 核心列")
 
             out = df[core_cols].copy().astype(float)
-            save_data(out, f"{plain_symbol}_{start_date}_{end_date}", data_dir=cache_dir)
+            if cache_key not in _CACHE_WRITTEN_KEYS:
+                try:
+                    save_data(out, cache_key, data_dir=cache_dir)
+                    _CACHE_WRITTEN_KEYS.add(cache_key)
+                except Exception:
+                    pass
             return out
 
         except Exception as e:
@@ -384,7 +402,7 @@ def fetch_stock_data(
                 time.sleep(retry_sleep * (i + 1))
 
     # 缓存回退
-    cache_path = os.path.join(cache_dir, f"{plain_symbol}_{start_date}_{end_date}.csv")
+    cache_path = os.path.join(cache_dir, f"{cache_key}.csv")
     if os.path.exists(cache_path):
         df_cache = load_data(cache_path)
         if not df_cache.empty:
@@ -403,11 +421,14 @@ def fetch_intraday_data(symbol: str, period: str = "1m", count: int = 240) -> pd
     xt_symbol = _to_xt_symbol(symbol)
 
     xtdata.download_history_data(xt_symbol, period=period, incrementally=True)
-    try:
-        xtdata.subscribe_quote(xt_symbol, period=period, count=-1)
-    except Exception:
-        # 订阅失败不阻断，继续尝试读取本地/已同步数据
-        pass
+    sub_key = f"{xt_symbol}:{period}"
+    if sub_key not in _SUBSCRIBED_KEYS:
+        try:
+            xtdata.subscribe_quote(xt_symbol, period=period, count=-1)
+            _SUBSCRIBED_KEYS.add(sub_key)
+        except Exception:
+            # 订阅失败不阻断，继续尝试读取本地/已同步数据
+            pass
 
     data = xtdata.get_market_data_ex(
         ["time", "open", "high", "low", "close", "volume", "amount"],

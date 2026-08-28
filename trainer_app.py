@@ -131,6 +131,20 @@ def _today_str():
     return datetime.now().strftime("%Y%m%d")
 
 
+# 会话/任务类内存对象上限：超出后丢弃最旧条目，避免长驻进程内存无界增长
+JOB_STORE_MAX_ITEMS = 200
+
+
+def _store_session(store: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    key = str(uuid.uuid4())
+    store[key] = payload
+    excess = len(store) - JOB_STORE_MAX_ITEMS
+    if excess > 0:
+        for old_key in list(store.keys())[:excess]:
+            store.pop(old_key, None)
+    return key
+
+
 def _normalize_plain_symbol(symbol: str) -> str:
     s = str(symbol or "").strip().upper()
     if "." in s:
@@ -501,31 +515,19 @@ def challenge():
     end = _today_str()
     df = fetch_stock_data(symbol, "20190101", end, retries=2)
 
-    if len(df) < hist_len + pred_days + 20:
+    # 抽题索引区间为 [hist_len+20, len-pred_days-1]，需保证区间非空
+    if len(df) < hist_len + pred_days + 21:
         return jsonify({"error": "样本不足"}), 400
 
     require_events = request.args.get("require_events", "1") == "1"
 
-    selected = None
-    max_try = 8
-    low_idx = hist_len + 20
-    high_idx = len(df) - pred_days - 1
-
     # MiniQMT 迁移后不依赖公网新闻接口，直接走K线随机抽题
-
-    # 回退：常规随机抽题
-    for _ in range(max_try):
-        if selected is not None:
-            break
-        i_try = random.randint(low_idx, high_idx)
-        anchor_try = str(df.index[i_try].date())
-        events_try = _fetch_event_context(symbol, anchor_date=anchor_try, max_items=5)
-        if (not require_events) or events_try:
-            selected = (i_try, anchor_try, events_try)
-            break
-        selected = (i_try, anchor_try, events_try)
-
-    i, anchor_date, events = selected
+    i = random.randint(hist_len + 20, len(df) - pred_days - 1)
+    anchor_date = str(df.index[i].date())
+    events = _fetch_event_context(symbol, anchor_date=anchor_date, max_items=5)
+    if require_events and not events:
+        # 事件流当前不可用，保留参数兼容但不再据此重抽
+        events = []
     hist = df.iloc[i - hist_len:i + 1].copy()
 
     current_close = float(df["close"].iloc[i])
@@ -535,8 +537,7 @@ def challenge():
     truth_direction = "上涨" if ret >= 0 else "下跌"
     truth_trend = _trend_label(df, i)
 
-    cid = str(uuid.uuid4())
-    CHALLENGES[cid] = {
+    cid = _store_session(CHALLENGES, {
         "symbol": symbol,
         "anchor_date": anchor_date,
         "ret": ret,
@@ -554,7 +555,7 @@ def challenge():
             for idx, r in hist.iterrows()
         ],
         "events": events,
-    }
+    })
 
     return jsonify({
         "id": cid,
@@ -598,8 +599,7 @@ def answer():
 
     level = "优秀" if score >= 80 else "合格" if score >= 60 else "继续训练"
 
-    rid = str(uuid.uuid4())
-    REVIEWS[rid] = {
+    rid = _store_session(REVIEWS, {
         "symbol": item["symbol"],
         "anchor_date": item["anchor_date"],
         "ret5_pct": round(item["ret"] * 100, 2),
@@ -609,7 +609,7 @@ def answer():
         "pred_trend": pred_trend,
         "candles": item["candles"],
         "events": item.get("events", []),
-    }
+    })
 
     return jsonify({
         "score": score,
@@ -673,12 +673,11 @@ def replay_codex():
     if rid not in REVIEWS:
         return jsonify({"error": "复盘记录不存在"}), 400
 
-    job_id = str(uuid.uuid4())
-    REPLAY_JOBS[job_id] = {
+    job_id = _store_session(REPLAY_JOBS, {
         "status": "queued",
         "review_id": rid,
         "created_at": datetime.now().isoformat(),
-    }
+    })
 
     t = threading.Thread(target=_run_replay_job, args=(job_id, rid), daemon=True)
     t.start()
@@ -1276,8 +1275,7 @@ def market_scan():
 
     try:
         if async_mode:
-            job_id = str(uuid.uuid4())
-            SCAN_JOBS[job_id] = {
+            job_id = _store_session(SCAN_JOBS, {
                 "status": "queued",
                 "progress": 0.0,
                 "completed": 0,
@@ -1288,7 +1286,7 @@ def market_scan():
                 "created_at": datetime.now().isoformat(),
                 "params": params,
                 "result": None,
-            }
+            })
             t = threading.Thread(target=_run_scan_job, args=(job_id, params), daemon=True)
             t.start()
             return jsonify({"job_id": job_id, "status": "queued"})
@@ -1521,13 +1519,12 @@ def _symbol_limit_up_rate(symbol: str) -> float:
     return 0.10
 
 
-def _is_limit_up_close(symbol: str, prev_close: Any, close: Any) -> bool:
-    prev_v = _to_float(prev_close, 0.0)
-    close_v = _to_float(close, 0.0)
-    if prev_v <= 0 or close_v <= 0:
-        return False
-    limit_rate = _symbol_limit_up_rate(symbol)
-    return (close_v / prev_v - 1.0) >= (limit_rate - 0.0015)
+def _mark_limit_up_series(symbol: str, close: pd.Series, prev_close: pd.Series) -> pd.Series:
+    """逐日收盘涨停判定（按板块涨停幅度，容差 0.0015；非正值/缺失视为否）。"""
+    close_num = pd.to_numeric(close, errors="coerce")
+    prev_num = pd.to_numeric(prev_close, errors="coerce")
+    rel = close_num / prev_num - 1.0
+    return (prev_num > 0) & (close_num > 0) & (rel >= (_symbol_limit_up_rate(symbol) - 0.0015))
 
 
 def _row_is_tradeable(row: pd.Series) -> bool:
@@ -1704,15 +1701,12 @@ def _finalize_backtest_dataset(
         prev_close = close_num.shift(1)
         one["tradeable"] = (one["is_trading"].fillna(0) == 1) & close_num.notna() & (close_num > 0)
         one["close_prev"] = prev_close
-        one["limit_up"] = [
-            _is_limit_up_close(symbol, prev_close.iloc[i], close_num.iloc[i]) if i > 0 else False
-            for i in range(len(one))
-        ]
+        one["limit_up"] = _mark_limit_up_series(str(symbol), close_num, prev_close)
         histories[str(symbol)] = one
 
     calendar_dates = sorted(pd.Timestamp(x) for x in subset.loc[(subset["date"] >= start_dt) & (subset["date"] <= end_dt), "date"].drop_duplicates().tolist())
 
-    bench_df = subset.copy()
+    bench_df = subset[["date", "stock_code", "close", "is_trading"]].copy()
     bench_df["ret_1d"] = bench_df.groupby("stock_code")["close"].pct_change()
     bench_df = bench_df[(bench_df["date"] >= start_dt) & (bench_df["date"] <= end_dt)]
     bench_df = bench_df[(bench_df["is_trading"].fillna(0) == 1) & bench_df["close"].notna() & bench_df["ret_1d"].notna()]
@@ -2035,11 +2029,8 @@ def _generate_realtime_signal_marks(daily_df: pd.DataFrame, rule_preset: str) ->
     prepared = _prepare_rule_indicator_frame(daily_df)
     prepared["tradeable"] = prepared["close"].notna() & (pd.to_numeric(prepared["close"], errors="coerce") > 0)
     symbol_code = _normalize_plain_symbol(str(daily_df.iloc[0].get("symbol") or daily_df.iloc[0].get("stock_code") or "000001")) or "000001"
-    prev_close = pd.to_numeric(prepared["close"], errors="coerce").shift(1)
-    prepared["limit_up"] = [
-        _is_limit_up_close(symbol_code, prev_close.iloc[i], prepared["close"].iloc[i]) if i > 0 else False
-        for i in range(len(prepared))
-    ]
+    close_num = pd.to_numeric(prepared["close"], errors="coerce")
+    prepared["limit_up"] = _mark_limit_up_series(symbol_code, close_num, close_num.shift(1))
 
     marks = []
     for i in range(len(prepared)):
@@ -2199,7 +2190,8 @@ def _generate_model_topk_batches(
             if item["backend_fallback"]:
                 fallback_count += 1
 
-        scored = sorted(scored, key=lambda item: (item.get("score", 0.0), item.get("return", -999.0)), reverse=True)
+        # 按分数降序；并列时以代码升序作确定性次序（不得用未来收益打破平手）
+        scored.sort(key=lambda item: (-item.get("score", 0.0), str(item.get("symbol", ""))))
         picked = scored[: min(int(top_k), len(scored))]
         if not picked:
             continue

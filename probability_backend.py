@@ -223,7 +223,6 @@ def _load_dl_entry(entrypoint: str) -> DLEntry:
 
     mod_name, fn_name = ep.split(":", 1)
     try:
-        importlib.invalidate_caches()
         mod = importlib.import_module(mod_name)
         fn = getattr(mod, fn_name)
         if not callable(fn):
@@ -255,21 +254,35 @@ class DLProbabilityBackend:
     name = "dl"
 
     def __init__(self, entrypoint: Optional[str] = None):
+        # 延迟解析入口：rule 后端为主时避免为构造本对象而导入 torch
+        self._entrypoint_override = (entrypoint or "").strip() or None
+        self._entry: Optional[DLEntry] = None
+
+    def _resolve_entrypoint(self) -> str:
+        if self._entrypoint_override:
+            return self._entrypoint_override
         cfg = _load_backend_config()
-        self.entrypoint = (
-            entrypoint
-            or os.getenv("STOCK_DL_ENTRYPOINT", "")
+        return (
+            os.getenv("STOCK_DL_ENTRYPOINT", "")
             or str(cfg.get("dl_entrypoint", ""))
         ).strip()
-        self._entry = _load_dl_entry(self.entrypoint)
+
+    def _ensure_entry(self) -> DLEntry:
+        if self._entry is None:
+            self._entry = _load_dl_entry(self._resolve_entrypoint())
+        return self._entry
+
+    @property
+    def entrypoint(self) -> str:
+        return self._ensure_entry().entrypoint
 
     @property
     def available(self) -> bool:
-        return self._entry.fn is not None
+        return self._ensure_entry().fn is not None
 
     @property
     def error(self) -> str:
-        return self._entry.error
+        return self._ensure_entry().error
 
     def predict(self, daily_df: pd.DataFrame) -> Dict[str, Any]:
         if not self.available:
@@ -432,7 +445,6 @@ def predict_probability_batch(
 
 
 def get_backend_runtime_status(requested: Optional[str] = None) -> Dict[str, Any]:
-    importlib.invalidate_caches()
     mode = _resolve_requested_backend(requested)
     _, chosen_backend, dl_backend, _ = _choose_backend(mode)
 
