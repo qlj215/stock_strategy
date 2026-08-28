@@ -25,9 +25,9 @@
 - data/dl/dl_v52_report.md
 
 运行示例：
-python train_lstm_v52.py
+python research_pipeline/train_lstm_v52.py
 
-python train_lstm_v52.py \
+python research_pipeline/train_lstm_v52.py \
   --lookback-days 8 \
   --label-delay-days 7 \
   --anchor-col pred_tree
@@ -43,7 +43,10 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from train_baseline import calc_metrics
+try:
+    from research_pipeline.train_baseline import calc_metrics
+except ModuleNotFoundError:
+    from train_baseline import calc_metrics
 
 
 def safe_spearman(g: pd.DataFrame, pred_col: str, target_col: str) -> float:

@@ -2644,4 +2644,10 @@ def market_backtest():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8787, debug=True)
+    port_raw = os.getenv("STOCK_STRATEGY_PORT", "8789").strip()
+    try:
+        port = int(port_raw)
+    except ValueError:
+        print(f"Invalid STOCK_STRATEGY_PORT={port_raw!r}, fallback to 8789", file=sys.stderr)
+        port = 8789
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

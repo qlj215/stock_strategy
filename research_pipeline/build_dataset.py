@@ -54,8 +54,8 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-# 确保能以脚本方式导入 stock_strategy 包
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 确保从 research_pipeline/ 里以脚本方式运行时仍能导入 stock_strategy 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from stock_strategy.data.fetcher import fetch_stock_data, list_a_share_symbols
 from stock_strategy.data.industry_scheme_a import attach_industry_scheme_a
@@ -396,8 +396,8 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "示例:\n"
-            "  python build_dataset.py --start 20200101 --end 20260331 --limit 20\n"
-            "  python build_dataset.py --symbols 000001,600519,300750 --start 20180101 --end 20260331\n"
+            "  python research_pipeline/build_dataset.py --start 20200101 --end 20260331 --limit 20\n"
+            "  python research_pipeline/build_dataset.py --symbols 000001,600519,300750 --start 20180101 --end 20260331\n"
             "\n"
             "调参建议:\n"
             "  1) 先小样本验证:--limit 20\n"

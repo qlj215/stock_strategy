@@ -34,11 +34,11 @@
 
 运行示例：
 - 默认跑法：
-  python train_baseline.py
+  python research_pipeline/train_baseline.py
 - 使用10日超额收益标签：
-  python train_baseline.py --target-col label_excess_ret_10d
+  python research_pipeline/train_baseline.py --target-col label_excess_ret_10d
 - 固定训练窗口（最近500个交易日）：
-  python train_baseline.py --train-window 500 --retrain-every 20
+  python research_pipeline/train_baseline.py --train-window 500 --retrain-every 20
 """
 
 from __future__ import annotations
@@ -507,9 +507,9 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "示例：\n"
-            "  python train_baseline.py\n"
-            "  python train_baseline.py --target-col label_excess_ret_10d\n"
-            "  python train_baseline.py --train-window 500 --retrain-every 20\n"
+            "  python research_pipeline/train_baseline.py\n"
+            "  python research_pipeline/train_baseline.py --target-col label_excess_ret_10d\n"
+            "  python research_pipeline/train_baseline.py --train-window 500 --retrain-every 20\n"
         ),
     )
 

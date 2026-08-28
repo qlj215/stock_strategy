@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+import sys
 import threading
 import webbrowser
 from dataclasses import asdict, dataclass
@@ -40,8 +42,11 @@ from typing import Dict, List, Tuple
 import pandas as pd
 from flask import Flask, jsonify, render_template_string, request
 
-from data import fetcher as fetcher_mod
-from data.fetcher import fetch_stock_data, get_symbol_name
+# 兼容从项目根目录直接运行：python stock_strategy/portfolio_whatif_web.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from stock_strategy.data import fetcher as fetcher_mod
+from stock_strategy.data.fetcher import fetch_stock_data, get_symbol_name
 
 
 COMMISSION_RATE = 0.0003
@@ -81,8 +86,8 @@ HTML_PAGE = r"""
     th { background:#fafbfd; }
     .stock-row { display:grid; grid-template-columns: 1.2fr 1fr auto; gap:10px; margin-bottom:10px; }
     .pill { display:inline-block; padding:4px 10px; border-radius:999px; background:#edf2ff; color:#2949c7; font-size:12px; margin-right:8px; }
-    .ok { color:#067647; }
-    .bad { color:#b42318; }
+    .ok { color:#b42318; }
+    .bad { color:#067647; }
     .summary-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; }
     .stat { background:#fafbfd; border:1px solid #edf0f5; border-radius:12px; padding:12px; }
     .stat .k { color:#667085; font-size:13px; }
@@ -349,13 +354,7 @@ class TradeResult:
 
 
 def _normalize_symbol(symbol: str) -> str:
-    helper = getattr(fetcher_mod, "_to_plain_symbol", None)
-    if callable(helper):
-        return helper(symbol)
-    digits = "".join(ch for ch in str(symbol) if ch.isdigit())
-    if not digits:
-        raise ValueError(f"无法识别股票代码：{symbol}")
-    return digits.zfill(6)
+    return fetcher_mod._to_plain_symbol(symbol)
 
 
 def _parse_input_time(raw: str, mode: str) -> datetime:

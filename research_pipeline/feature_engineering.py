@@ -288,9 +288,9 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "示例：\n"
-            "  python feature_engineering.py\n"
-            "  python feature_engineering.py --horizons 5,10,20 --min-history 80\n"
-            "  python feature_engineering.py --normalize none --drop-na-features\n"
+            "  python research_pipeline/feature_engineering.py\n"
+            "  python research_pipeline/feature_engineering.py --horizons 5,10,20 --min-history 80\n"
+            "  python research_pipeline/feature_engineering.py --normalize none --drop-na-features\n"
             "\n"
             "调参建议：\n"
             "  1) 先固定 horizons=5,10 验证流程\n"

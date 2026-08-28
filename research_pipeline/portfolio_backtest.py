@@ -14,7 +14,7 @@
 - 后续阶段6.1/6.2 可继续升级为更贴近实盘的 T+1 开盘撮合、涨跌停/停牌约束、行业中性化等版本。
 
 快速使用示例：
-python portfolio_backtest.py \
+python research_pipeline/portfolio_backtest.py \
   --signal-config data/dl/dl_v52_result.csv::pred_v52::stage5_2_selector \
   --signal-config data/baseline/baseline_v41_result.csv::pred_tree::stage4_1_tree \
   --signal-config data/baseline/baseline_v41_result.csv::pred_blend::stage4_1_blend \

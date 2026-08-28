@@ -150,6 +150,49 @@
       color: var(--muted);
       font-size: 13px;
     }
+    .backendBanner {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 14px;
+      border-radius: 14px;
+      padding: 13px 14px;
+      margin-bottom: 14px;
+      border: 1px solid var(--line);
+      background: rgba(16, 21, 43, 0.72);
+    }
+    .backendBanner strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+    .backendBanner .backendDetail {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .backendBanner.checking {
+      border-color: rgba(168, 178, 215, 0.22);
+    }
+    .backendBanner.ok {
+      border-color: rgba(74, 201, 138, 0.34);
+      background: rgba(74, 201, 138, 0.10);
+    }
+    .backendBanner.warn {
+      border-color: rgba(245, 197, 66, 0.34);
+      background: rgba(245, 197, 66, 0.10);
+    }
+    .backendBadge {
+      flex: 0 0 auto;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    .backendBanner.ok .backendBadge { color: var(--green); }
+    .backendBanner.warn .backendBadge { color: var(--gold); }
     .statusStrip {
       display: flex;
       gap: 12px;
@@ -246,6 +289,14 @@
   <div class="pageHeader">
     <h2>小初 · A股市场看板</h2>
     <p>实时量价 + 概率扫描 + 历史回测。历史回测支持手动股票池、主板全市场和单行业，并分为规则策略与模型策略两大类。</p>
+  </div>
+
+  <div id="dlBackendBanner" class="backendBanner checking">
+    <div>
+      <strong>DL 后端状态检查中</strong>
+      <div class="backendDetail">正在确认网页端历史回测是否可以使用外部深度学习后端。</div>
+    </div>
+    <span class="backendBadge">CHECK</span>
   </div>
 
   <div class="card">
@@ -650,6 +701,79 @@ function escapeHtml(value){
     "'": '&#39;'
   }[ch]));
 }
+
+function renderDlBackendBanner(status){
+  const banner = document.getElementById('dlBackendBanner');
+  if (!banner) return;
+
+  const available = !!status?.dl_available && status?.selected_with_fallback === 'dl';
+  const requested = status?.requested || 'dl';
+  const actual = status?.selected_with_fallback || '-';
+  const entrypoint = status?.dl_entrypoint || status?.dl_entrypoint_config || '未配置';
+  const err = status?.dl_error || '';
+  const processInfo = [
+    status?.process_id ? `PID ${status.process_id}` : '',
+    status?.python_executable ? `Python ${status.python_executable}` : '',
+    status?.torch_version ? `torch ${status.torch_version}` : 'torch 未导入',
+    status?.working_directory ? `cwd ${status.working_directory}` : ''
+  ].filter(Boolean).join('；');
+  const fixHint = `最稳妥：不要和其他项目共用 8787，给 stock_strategy 固定独立端口。推荐使用 8789：在项目目录执行 STOCK_STRATEGY_PORT=8789 ./.venv/bin/python trainer_app.py，然后访问 http://127.0.0.1:8789/market。如果要换端口，把命令和访问地址里的端口同步改掉。`;
+
+  banner.className = `backendBanner ${available ? 'ok' : 'warn'}`;
+  if (available) {
+    banner.innerHTML = `
+      <div>
+        <strong>DL 后端可用</strong>
+        <div class="backendDetail">
+          历史回测选择 dl / 外部深度学习时会实际使用 DL。请求：${escapeHtml(requested)}，实际：${escapeHtml(actual)}，入口：${escapeHtml(entrypoint)}。<br>
+          进程：${escapeHtml(processInfo || '未知')}<br>
+          解决方法：${escapeHtml(fixHint)}
+        </div>
+      </div>
+      <span class="backendBadge">DL OK</span>
+    `;
+    return;
+  }
+
+  const reason = err || `当前实际后端为 ${actual}，DL 未被选中。`;
+  banner.innerHTML = `
+    <div>
+      <strong>DL 后端不可用，模型策略会回退到 rule</strong>
+      <div class="backendDetail">
+        原因：${escapeHtml(reason)}<br>
+        进程：${escapeHtml(processInfo || '未知')}<br>
+        解决方法：${escapeHtml(fixHint)} 确认虚拟环境中 <code>import torch</code> 正常。
+      </div>
+    </div>
+    <span class="backendBadge">FALLBACK</span>
+  `;
+}
+
+async function checkDlBackendStatus(){
+  const banner = document.getElementById('dlBackendBanner');
+  try {
+    const r = await fetch('/api/market/model_backend_status?backend=dl');
+    const status = await r.json();
+    if (!r.ok || status.error) {
+      throw new Error(status.error || `HTTP ${r.status}`);
+    }
+    renderDlBackendBanner(status);
+  } catch (err) {
+    if (!banner) return;
+    banner.className = 'backendBanner warn';
+    banner.innerHTML = `
+      <div>
+        <strong>DL 后端状态获取失败</strong>
+        <div class="backendDetail">
+          无法调用状态接口：${escapeHtml(err?.message || err || 'unknown')}。请确认 Flask 服务已启动并访问同一个端口。<br>
+          解决方法：最稳妥是不要和其他项目共用 8787，给 stock_strategy 固定独立端口。推荐使用 8789：在项目目录执行 STOCK_STRATEGY_PORT=8789 ./.venv/bin/python trainer_app.py，然后访问 http://127.0.0.1:8789/market。如果要换端口，把命令和访问地址里的端口同步改掉。
+        </div>
+      </div>
+      <span class="backendBadge">ERROR</span>
+    `;
+  }
+}
+
 function csvEscape(value){
   const text = String(value ?? '');
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -1534,6 +1658,7 @@ async function runBacktest(){
 }
 
 setDefaultScanAnchor();
+checkDlBackendStatus();
 loadOverview();
 loadSectors();
 toggleScanMode();

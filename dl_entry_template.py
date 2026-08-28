@@ -33,7 +33,8 @@ try:
     from torch.utils.data import DataLoader, TensorDataset
 except Exception as e:  # pragma: no cover
     raise RuntimeError(
-        "PyTorch 未安装，无法启用 DL 后端。请先在项目 .venv 安装 torch。"
+        "PyTorch 未安装或当前服务进程无法导入 PyTorch，无法启用 DL 后端。"
+        f"原始错误：{type(e).__name__}: {e}"
     ) from e
 
 

@@ -1,7 +1,7 @@
 # 阶段3：feature_engineering.py 调参与输入输出说明（详细版）
 
 > 分支：`feat/dl-plan-stage2`  
-> 模块：`stock_strategy/feature_engineering.py`
+> 模块：`stock_strategy/research_pipeline/feature_engineering.py`
 
 ---
 
@@ -81,7 +81,7 @@
 
 示例：
 ```bash
-python feature_engineering.py --horizons 5,10,20
+python research_pipeline/feature_engineering.py --horizons 5,10,20
 ```
 
 ---
@@ -100,7 +100,7 @@ python feature_engineering.py --horizons 5,10,20
 
 示例：
 ```bash
-python feature_engineering.py --min-history 90
+python research_pipeline/feature_engineering.py --min-history 90
 ```
 
 ---
@@ -120,7 +120,7 @@ python feature_engineering.py --min-history 90
 
 示例：
 ```bash
-python feature_engineering.py --cls-quantile 0.2
+python research_pipeline/feature_engineering.py --cls-quantile 0.2
 ```
 
 ---
@@ -138,7 +138,7 @@ python feature_engineering.py --cls-quantile 0.2
 
 示例：
 ```bash
-python feature_engineering.py --normalize none
+python research_pipeline/feature_engineering.py --normalize none
 ```
 
 ---
@@ -156,7 +156,7 @@ python feature_engineering.py --normalize none
 
 示例：
 ```bash
-python feature_engineering.py --drop-na-features
+python research_pipeline/feature_engineering.py --drop-na-features
 ```
 
 ---
@@ -174,7 +174,7 @@ python feature_engineering.py --drop-na-features
 
 示例：
 ```bash
-python feature_engineering.py --drop-na-features --industry-feature-mode zero
+python research_pipeline/feature_engineering.py --drop-na-features --industry-feature-mode zero
 ```
 
 ---
@@ -184,13 +184,13 @@ python feature_engineering.py --drop-na-features --industry-feature-mode zero
 ### 配方1：默认稳定版（推荐）
 
 ```bash
-python feature_engineering.py --drop-na-features
+python research_pipeline/feature_engineering.py --drop-na-features
 ```
 
 ### 配方2：稳健性探索版
 
 ```bash
-python feature_engineering.py \
+python research_pipeline/feature_engineering.py \
   --horizons 5,10,20 \
   --min-history 90 \
   --cls-quantile 0.2 \
@@ -203,7 +203,7 @@ python feature_engineering.py \
 ## 6. 当前实跑结果（本次）
 
 - 输入：`data/processed/daily_panel.parquet`
-- 命令：`python feature_engineering.py --drop-na-features`
+- 命令：`python research_pipeline/feature_engineering.py --drop-na-features`
 - 输出：
   - `data/features/features_v1.parquet`
   - `data/features/feature_manifest.json`

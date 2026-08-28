@@ -28,7 +28,7 @@
 
 ### 2.1 新增脚本
 
-- `train_lstm_v52.py`
+- `research_pipeline/train_lstm_v52.py`
 
 功能：
 
@@ -49,12 +49,12 @@
 ### 2.3 文档与配置更新
 
 - `report/阶段5_2_test指标冲刺与动态模型选择报告.md`（本文件）
-- `model_config.yaml` 增加 `stage5_2_selector` 参数模板
+- `research_pipeline/model_config.yaml` 增加 `stage5_2_selector` 参数模板
 - `plans/a_stock_dl_project_plans/PROGRESS.md` 新增阶段5.2进度与结果
 
 ### 2.4 推理权重补齐（2026-04-02）
 
-- `train_lstm.py` 新增权重保存能力：
+- `research_pipeline/train_lstm.py` 新增权重保存能力：
   - 最新权重：`data/dl/checkpoints/lstm_latest.pt`
   - 元信息：`data/dl/checkpoints/lstm_latest_meta.json`
 - 元信息包含特征列、seq_len、目标列、最新训练窗口等，可直接用于后续推理对齐。
@@ -86,7 +86,7 @@
 ## 4. 本次实跑配置
 
 ```bash
-python train_lstm_v52.py \
+python research_pipeline/train_lstm_v52.py \
   --lstm-result data/dl/dl_result.csv \
   --anchor-result data/baseline/baseline_v41_result.csv \
   --anchor-col pred_tree \

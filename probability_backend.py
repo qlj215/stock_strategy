@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -222,6 +223,7 @@ def _load_dl_entry(entrypoint: str) -> DLEntry:
 
     mod_name, fn_name = ep.split(":", 1)
     try:
+        importlib.invalidate_caches()
         mod = importlib.import_module(mod_name)
         fn = getattr(mod, fn_name)
         if not callable(fn):
@@ -430,6 +432,7 @@ def predict_probability_batch(
 
 
 def get_backend_runtime_status(requested: Optional[str] = None) -> Dict[str, Any]:
+    importlib.invalidate_caches()
     mode = _resolve_requested_backend(requested)
     _, chosen_backend, dl_backend, _ = _choose_backend(mode)
 
@@ -439,8 +442,22 @@ def get_backend_runtime_status(requested: Optional[str] = None) -> Dict[str, Any
         selected_with_fallback = "rule"
 
     cfg = _load_backend_config()
+    torch_version = ""
+    torch_error = ""
+    try:
+        import torch  # type: ignore
+
+        torch_version = str(getattr(torch, "__version__", "unknown"))
+    except Exception as e:
+        torch_version = ""
+        torch_error = f"{type(e).__name__}: {e}"
+
     return {
         "requested": mode,
+        "process_id": os.getpid(),
+        "python_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "working_directory": os.getcwd(),
         "env_default": os.getenv("STOCK_PROB_BACKEND", ""),
         "config_default": str(cfg.get("default_backend", "rule")),
         "config_path": str(cfg.get("_path", "")),
@@ -451,4 +468,6 @@ def get_backend_runtime_status(requested: Optional[str] = None) -> Dict[str, Any
         "dl_entrypoint_config": str(cfg.get("dl_entrypoint", "")),
         "dl_available": bool(dl_backend.available),
         "dl_error": dl_backend.error,
+        "torch_version": torch_version,
+        "torch_error": torch_error,
     }

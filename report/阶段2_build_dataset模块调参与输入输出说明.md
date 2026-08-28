@@ -1,13 +1,13 @@
 # 阶段2：build_dataset.py 调参与输入输出说明（详细版）
 
 > 适用分支：`feat/dl-plan-stage2`  
-> 模块文件：`stock_strategy/build_dataset.py`
+> 模块文件：`stock_strategy/research_pipeline/build_dataset.py`
 
 ---
 
 ## 1. 模块定位
 
-`build_dataset.py` 是七阶段计划中的 **阶段2（研究数据集构建）** 核心脚本。  
+`research_pipeline/build_dataset.py` 是七阶段计划中的 **阶段2（研究数据集构建）** 核心脚本。  
 目标是把 MiniQMT/xtdata 拉到的日频数据，整理成后续阶段可直接使用的标准面板数据。
 
 它不改 `trainer_app.py` 主线逻辑，只服务于独立研究分支。
@@ -83,7 +83,7 @@
 ### 场景 A：快速冒烟（确认链路）
 
 ```bash
-python build_dataset.py --start 20220101 --end 20260331 --limit 20
+python research_pipeline/build_dataset.py --start 20220101 --end 20260331 --limit 20
 ```
 
 - 目标：几分钟内看到 parquet 产出
@@ -92,7 +92,7 @@ python build_dataset.py --start 20220101 --end 20260331 --limit 20
 ### 场景 B：阶段2正式版
 
 ```bash
-python build_dataset.py --start 20180101 --end 20260331 --limit 200 --retries 3
+python research_pipeline/build_dataset.py --start 20180101 --end 20260331 --limit 200 --retries 3
 ```
 
 - 目标：用于阶段3特征工程
@@ -101,7 +101,7 @@ python build_dataset.py --start 20180101 --end 20260331 --limit 200 --retries 3
 ### 场景 C：严格可复现
 
 ```bash
-python build_dataset.py \
+python research_pipeline/build_dataset.py \
   --symbols 000001,600036,600519,000858,300750,002594,600276,603986,688981,300760 \
   --start 20190101 --end 20260331 --train-ratio 0.7 --val-ratio 0.15
 ```
@@ -111,7 +111,7 @@ python build_dataset.py \
 ### 场景 D：方案A行业补齐（当前推荐）
 
 ```bash
-python build_dataset.py \
+python research_pipeline/build_dataset.py \
   --start 20200101 --end 20260331 --limit 20 \
   --industry-scheme scheme_a_local \
   --industry-map-path data/meta/industry_map_scheme_a.csv \
@@ -124,7 +124,7 @@ python build_dataset.py \
 ### 场景 E：剔除上市前补齐空K线（减少 OHLC 空值）
 
 ```bash
-python build_dataset.py \
+python research_pipeline/build_dataset.py \
   --start 20200101 --end 20260331 --limit 20 \
   --prelisting-null-mode drop
 ```
@@ -165,4 +165,4 @@ python build_dataset.py \
 
 ## 7. 一句话总结
 
-`build_dataset.py` 已经具备“可复现、可调参、可衔接后续阶段”的阶段2基础能力；你后续只要固定股票池和时间窗口，就可以稳定地推进阶段3/4/5。
+`research_pipeline/build_dataset.py` 已经具备“可复现、可调参、可衔接后续阶段”的阶段2基础能力；你后续只要固定股票池和时间窗口，就可以稳定地推进阶段3/4/5。

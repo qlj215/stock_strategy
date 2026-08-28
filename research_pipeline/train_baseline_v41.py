@@ -37,11 +37,11 @@
 
 运行示例：
 - 默认稳健版：
-  python train_baseline_v41.py
+  python research_pipeline/train_baseline_v41.py
 - 更快重训 + 行业感知：
-  python train_baseline_v41.py --tree-retrain-every 10 --use-industry-onehot --industry-neutralize-pred
+  python research_pipeline/train_baseline_v41.py --tree-retrain-every 10 --use-industry-onehot --industry-neutralize-pred
 - 固定融合（回退简单模式）：
-  python train_baseline_v41.py --blend-mode static --blend-static-w-ridge 0.6
+  python research_pipeline/train_baseline_v41.py --blend-mode static --blend-static-w-ridge 0.6
 """
 
 from __future__ import annotations
@@ -55,15 +55,26 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from train_baseline import (
-    RidgeClosedForm,
-    SimpleTreeRegressor,
-    add_split_col,
-    calc_metrics,
-    load_split_boundaries,
-    resolve_feature_cols,
-    walk_forward_predict,
-)
+try:
+    from research_pipeline.train_baseline import (
+        RidgeClosedForm,
+        SimpleTreeRegressor,
+        add_split_col,
+        calc_metrics,
+        load_split_boundaries,
+        resolve_feature_cols,
+        walk_forward_predict,
+    )
+except ModuleNotFoundError:
+    from train_baseline import (
+        RidgeClosedForm,
+        SimpleTreeRegressor,
+        add_split_col,
+        calc_metrics,
+        load_split_boundaries,
+        resolve_feature_cols,
+        walk_forward_predict,
+    )
 
 
 def _safe_spearman(g: pd.DataFrame, pred_col: str, target_col: str) -> float:
@@ -315,10 +326,10 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "示例：\n"
-            "  python train_baseline_v41.py\n"
-            "  python train_baseline_v41.py --tree-retrain-every 10 --tree-train-window 750\n"
-            "  python train_baseline_v41.py --blend-mode static --blend-static-w-ridge 0.6\n"
-            "  python train_baseline_v41.py --use-industry-onehot --industry-neutralize-pred\n"
+            "  python research_pipeline/train_baseline_v41.py\n"
+            "  python research_pipeline/train_baseline_v41.py --tree-retrain-every 10 --tree-train-window 750\n"
+            "  python research_pipeline/train_baseline_v41.py --blend-mode static --blend-static-w-ridge 0.6\n"
+            "  python research_pipeline/train_baseline_v41.py --use-industry-onehot --industry-neutralize-pred\n"
         ),
     )
 

@@ -41,16 +41,16 @@
 
 运行示例：
 - 默认（先打通链路）：
-  python train_lstm.py
+  python research_pipeline/train_lstm.py
 
 - 更轻量快速（重训少、epoch 少）：
-  python train_lstm.py --retrain-every 60 --epochs 8
+  python research_pipeline/train_lstm.py --retrain-every 60 --epochs 8
 
 - 近期窗口版本（应对时变）：
-  python train_lstm.py --train-window 750 --retrain-every 20
+  python research_pipeline/train_lstm.py --train-window 750 --retrain-every 20
 
 - 自动检测GPU（显存至少8GB，不满足则自动回退CPU）：
-  python train_lstm.py --device auto --gpu-min-memory-gb 8
+  python research_pipeline/train_lstm.py --device auto --gpu-min-memory-gb 8
 """
 
 from __future__ import annotations
@@ -70,12 +70,20 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from train_baseline import (
-    add_split_col,
-    calc_metrics,
-    load_split_boundaries,
-    resolve_feature_cols,
-)
+try:
+    from research_pipeline.train_baseline import (
+        add_split_col,
+        calc_metrics,
+        load_split_boundaries,
+        resolve_feature_cols,
+    )
+except ModuleNotFoundError:
+    from train_baseline import (
+        add_split_col,
+        calc_metrics,
+        load_split_boundaries,
+        resolve_feature_cols,
+    )
 
 
 @dataclass
@@ -742,9 +750,9 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "示例：\n"
-            "  python train_lstm.py\n"
-            "  python train_lstm.py --retrain-every 60 --epochs 8\n"
-            "  python train_lstm.py --train-window 750 --retrain-every 20\n"
+            "  python research_pipeline/train_lstm.py\n"
+            "  python research_pipeline/train_lstm.py --retrain-every 60 --epochs 8\n"
+            "  python research_pipeline/train_lstm.py --train-window 750 --retrain-every 20\n"
         ),
     )
 
@@ -907,7 +915,7 @@ def main():
                 "saved_at": datetime.now().isoformat(),
                 "model_out": str(model_out_path),
                 "torch_version": str(torch.__version__),
-                "train_script": "train_lstm.py",
+                "train_script": "research_pipeline/train_lstm.py",
             }
         )
 
