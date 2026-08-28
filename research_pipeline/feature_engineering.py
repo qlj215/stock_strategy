@@ -33,7 +33,7 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import List
 
 import numpy as np
 import pandas as pd

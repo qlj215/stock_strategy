@@ -361,8 +361,6 @@ def test_legacy_backtest_branch():
     assert ta._is_legacy_backtest_request({}) is False
 
     with ta.app.test_request_context("/api/market/backtest?symbol=000001&start=20230101&end=20240101&threshold=0.5&long_horizon=40"):
-        from flask import request as flask_request
-
         # 触发 legacy 分支的完整链路（分类指标 + 策略回测 + 校准分箱）
         ta._daily_from_fetcher = lambda symbol, start, end, **k: df
         try:
