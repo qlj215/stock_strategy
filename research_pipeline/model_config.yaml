@@ -1,5 +1,5 @@
 # 阶段5（LSTM）推荐配置
-# 说明：当前 train_lstm.py 以 CLI 参数为准；本文件用于沉淀可复用参数模板。
+# 说明：当前 research_pipeline/train_lstm.py 以 CLI 参数为准；本文件用于沉淀可复用参数模板。
 
 stage5_lstm:
   in_path: data/features/features_v1.parquet

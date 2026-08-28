@@ -22,8 +22,8 @@
 
 ### 2.1 新增脚本与配置
 
-- `train_lstm.py`：阶段5主脚本（LSTM + 滚动重训 + 指标输出）
-- `model_config.yaml`：阶段5参数模板（便于后续复用与调参记录）
+- `research_pipeline/train_lstm.py`：阶段5主脚本（LSTM + 滚动重训 + 指标输出）
+- `research_pipeline/model_config.yaml`：阶段5参数模板（便于后续复用与调参记录）
 
 ### 2.2 新增数据产物
 
@@ -42,18 +42,18 @@
 
 ## 3. 代码使用说明（已写入脚本）
 
-`train_lstm.py` 顶部已补充“输入输出说明 + 调参速查 + 运行示例”。
+`research_pipeline/train_lstm.py` 顶部已补充“输入输出说明 + 调参速查 + 运行示例”。
 
 ### 3.1 默认运行
 
 ```bash
-python train_lstm.py
+python research_pipeline/train_lstm.py
 ```
 
 ### 3.2 本次实跑命令
 
 ```bash
-python train_lstm.py \
+python research_pipeline/train_lstm.py \
   --in data/features/features_v1.parquet \
   --split-manifest data/processed/split_manifest.json \
   --feature-manifest data/features/feature_manifest.json \

@@ -33,7 +33,7 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -288,9 +288,9 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "示例：\n"
-            "  python feature_engineering.py\n"
-            "  python feature_engineering.py --horizons 5,10,20 --min-history 80\n"
-            "  python feature_engineering.py --normalize none --drop-na-features\n"
+            "  python research_pipeline/feature_engineering.py\n"
+            "  python research_pipeline/feature_engineering.py --horizons 5,10,20 --min-history 80\n"
+            "  python research_pipeline/feature_engineering.py --normalize none --drop-na-features\n"
             "\n"
             "调参建议：\n"
             "  1) 先固定 horizons=5,10 验证流程\n"

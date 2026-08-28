@@ -3,7 +3,7 @@
 
 说明：
 1) 不再依赖 AKShare 的公网抓取链路，避免 Eastmoney 限流/风控导致的不稳定。
-2) 行情由本机 MiniQMT 提供：运行脚本前需先启动并保持 MiniQMT 在线。
+2) 行情由本机 MiniQMT 提供；本模块可按配置自动尝试拉起 MiniQMT。
 3) 保留原 fetch_stock_data 接口签名，尽量减少上层调用改动。
 """
 
@@ -11,12 +11,206 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import time
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 
 
+_MINIQMT_LAUNCH_ATTEMPTED = False
+_MINIQMT_LAUNCH_RESULT: Dict[str, Any] = {
+    "attempted": False,
+    "success": False,
+    "path": "",
+    "detail": "",
+    "already_running": False,
+}
+# 本进程内已落盘的缓存键，避免同参数重复拉取时反复写 CSV
+_CACHE_WRITTEN_KEYS: set = set()
+# 已建立的分钟行情订阅，避免重复 subscribe_quote
+_SUBSCRIBED_KEYS: set = set()
+
+
+def _is_wsl() -> bool:
+    return bool(os.environ.get("WSL_DISTRO_NAME")) or ("microsoft" in os.uname().release.lower())
+
+
+def _wsl_to_windows_path(path: str) -> str:
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    if re.match(r"^[A-Za-z]:\\", p):
+        return p
+    m = re.match(r"^/mnt/([a-zA-Z])/(.*)$", p)
+    if not m:
+        return p
+    drive = m.group(1).upper()
+    rest = m.group(2).replace("/", "\\")
+    return f"{drive}:\\{rest}"
+
+
+def _windows_to_wsl_path(path: str) -> str:
+    p = str(path or "").strip()
+    m = re.match(r"^([A-Za-z]):\\(.*)$", p)
+    if not m:
+        return p
+    drive = m.group(1).lower()
+    rest = m.group(2).replace("\\", "/")
+    return f"/mnt/{drive}/{rest}"
+
+
+def _path_exists_cross_platform(path: str) -> bool:
+    p = str(path or "").strip()
+    if not p:
+        return False
+    if os.path.exists(p):
+        return True
+    alt = _windows_to_wsl_path(p)
+    return alt != p and os.path.exists(alt)
+
+
+def _candidate_miniqmt_paths() -> List[str]:
+    candidates = [
+        os.environ.get("MINIQMT_EXE", ""),
+        os.environ.get("XTMINIQMT_EXE", ""),
+        os.environ.get("QMT_EXE", ""),
+        r"C:\Users\24333\国金证券QMT交易端\bin.x64\XtMiniQmt.exe",
+    ]
+
+    out: List[str] = []
+    seen = set()
+    for p in candidates:
+        p = str(p or "").strip()
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def _candidate_miniqmt_process_names() -> List[str]:
+    names = [os.path.basename(p) for p in _candidate_miniqmt_paths() if str(p or "").strip()]
+    names.append("XtMiniQmt.exe")
+
+    out: List[str] = []
+    seen = set()
+    for name in names:
+        name = str(name or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _is_miniqmt_running() -> bool:
+    if not (os.name == "nt" or _is_wsl()):
+        return False
+
+    for process_name in _candidate_miniqmt_process_names():
+        try:
+            if os.name == "nt":
+                cmd = ["tasklist", "/FI", f"IMAGENAME eq {process_name}"]
+            else:
+                cmd = ["cmd.exe", "/C", "tasklist", "/FI", f"IMAGENAME eq {process_name}"]
+
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=10,
+            )
+            output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+            if process_name.lower() in output:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _launch_miniqmt_if_needed() -> None:
+    global _MINIQMT_LAUNCH_ATTEMPTED, _MINIQMT_LAUNCH_RESULT
+
+    auto_start = str(os.environ.get("MINIQMT_AUTO_START", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    if not auto_start or _MINIQMT_LAUNCH_ATTEMPTED:
+        return
+
+    _MINIQMT_LAUNCH_ATTEMPTED = True
+    _MINIQMT_LAUNCH_RESULT = {
+        "attempted": True,
+        "success": False,
+        "path": "",
+        "detail": "未找到可用 MiniQMT 路径",
+        "already_running": False,
+    }
+
+    if _is_miniqmt_running():
+        _MINIQMT_LAUNCH_RESULT = {
+            "attempted": True,
+            "success": True,
+            "path": "",
+            "detail": "检测到 MiniQMT 已在运行，跳过自动启动",
+            "already_running": True,
+        }
+        return
+
+    for candidate in _candidate_miniqmt_paths():
+        if not _path_exists_cross_platform(candidate):
+            continue
+
+        try:
+            if os.name == "nt":
+                subprocess.Popen([candidate], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif _is_wsl():
+                win_path = _wsl_to_windows_path(candidate)
+                subprocess.Popen(
+                    ["cmd.exe", "/C", "start", "", win_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                # 非 Windows/WSL 环境不强行启动，避免误调用 wine 等未知环境
+                _MINIQMT_LAUNCH_RESULT = {
+                    "attempted": True,
+                    "success": False,
+                    "path": candidate,
+                    "detail": "当前环境不是 Windows/WSL，跳过 MiniQMT 自动启动",
+                    "already_running": False,
+                }
+                return
+
+            wait_sec = float(os.environ.get("MINIQMT_STARTUP_WAIT_SEC", "3"))
+            time.sleep(max(0.0, wait_sec))
+            _MINIQMT_LAUNCH_RESULT = {
+                "attempted": True,
+                "success": True,
+                "path": candidate,
+                "detail": "已尝试自动启动 MiniQMT",
+                "already_running": False,
+            }
+            return
+        except Exception as e:
+            _MINIQMT_LAUNCH_RESULT = {
+                "attempted": True,
+                "success": False,
+                "path": candidate,
+                "detail": str(e),
+                "already_running": False,
+            }
+
+
+def get_miniqmt_launch_status() -> Dict[str, Any]:
+    return dict(_MINIQMT_LAUNCH_RESULT)
+
+
+# —— xtdata 连接就绪探测（端口候选 / 行情服务探活 / 连接诊断） ——
 _XT_READY = False
 _XT_READY_PORT: Optional[int] = None
 
@@ -148,12 +342,21 @@ def _ensure_xtdata_ready(xtdata):
 
 
 def _load_xtdata():
+    _launch_miniqmt_if_needed()
     try:
         from xtquant import xtdata  # type: ignore
     except Exception as e:
+        launch_msg = ""
+        if _MINIQMT_LAUNCH_RESULT.get("attempted"):
+            launch_msg = (
+                f" 自动启动状态: success={_MINIQMT_LAUNCH_RESULT.get('success')},"
+                f" path={_MINIQMT_LAUNCH_RESULT.get('path')},"
+                f" detail={_MINIQMT_LAUNCH_RESULT.get('detail')}。"
+            )
         raise RuntimeError(
             "未检测到可用 xtquant/xtdata。请使用 Python 3.6~3.13 安装 xtquant，"
-            "并先启动 MiniQMT 客户端。"
+            "并确认 MiniQMT 客户端可用。"
+            + launch_msg
         ) from e
 
     _ensure_xtdata_ready(xtdata)
@@ -260,6 +463,11 @@ def _normalize_xt_kline_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _daily_cache_key(plain_symbol: str, start_date: str, end_date: str, dividend_type: str) -> str:
+    # 复权口径会影响取值，纳入缓存键，避免不同 adjust 共用一个缓存文件
+    return f"{plain_symbol}_{start_date}_{end_date}_{dividend_type}"
+
+
 def fetch_stock_data(
     symbol: str,
     start_date: str,
@@ -274,11 +482,15 @@ def fetch_stock_data(
 
     返回格式与旧版保持一致：
     index=date, columns 至少包含 open/high/low/close/volume。
+
+    成功拉取后尽力写入一份 CSV 缓存（同参数本进程内只写一次，
+    写失败不影响返回），仅当 xtdata 不可用时回退读取。
     """
     xtdata = _load_xtdata()
     xt_symbol = _to_xt_symbol(symbol)
     plain_symbol = _to_plain_symbol(symbol)
     dividend_type = _map_adjust_to_dividend_type(adjust)
+    cache_key = _daily_cache_key(plain_symbol, start_date, end_date, dividend_type)
 
     last_err: Optional[Exception] = None
 
@@ -309,7 +521,12 @@ def fetch_stock_data(
                 raise ValueError("返回数据缺少 OHLCV 核心列")
 
             out = df[core_cols].copy().astype(float)
-            save_data(out, f"{plain_symbol}_{start_date}_{end_date}", data_dir=cache_dir)
+            if cache_key not in _CACHE_WRITTEN_KEYS:
+                try:
+                    save_data(out, cache_key, data_dir=cache_dir)
+                    _CACHE_WRITTEN_KEYS.add(cache_key)
+                except Exception:
+                    pass
             return out
 
         except Exception as e:
@@ -318,7 +535,7 @@ def fetch_stock_data(
                 time.sleep(retry_sleep * (i + 1))
 
     # 缓存回退
-    cache_path = os.path.join(cache_dir, f"{plain_symbol}_{start_date}_{end_date}.csv")
+    cache_path = os.path.join(cache_dir, f"{cache_key}.csv")
     if os.path.exists(cache_path):
         df_cache = load_data(cache_path)
         if not df_cache.empty:
@@ -337,11 +554,14 @@ def fetch_intraday_data(symbol: str, period: str = "1m", count: int = 240) -> pd
     xt_symbol = _to_xt_symbol(symbol)
 
     xtdata.download_history_data(xt_symbol, period=period, incrementally=True)
-    try:
-        xtdata.subscribe_quote(xt_symbol, period=period, count=-1)
-    except Exception:
-        # 订阅失败不阻断，继续尝试读取本地/已同步数据
-        pass
+    sub_key = f"{xt_symbol}:{period}"
+    if sub_key not in _SUBSCRIBED_KEYS:
+        try:
+            xtdata.subscribe_quote(xt_symbol, period=period, count=-1)
+            _SUBSCRIBED_KEYS.add(sub_key)
+        except Exception:
+            # 订阅失败不阻断，继续尝试读取本地/已同步数据
+            pass
 
     data = xtdata.get_market_data_ex(
         ["time", "open", "high", "low", "close", "volume", "amount"],

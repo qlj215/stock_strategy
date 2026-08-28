@@ -13,11 +13,12 @@
 - [x] 阶段5.1：LSTM稳健增强 + GPU自动辨识（本次完成）
 - [x] 阶段5.2：LSTM test指标冲刺（动态模型选择）
 - [ ] 阶段6：组合回测系统
+  - [x] 阶段6.0：链路打通版（独立组合回测脚本 + 多信号统一评估 + 成本前后净值 + 分层曲线）
 - [ ] 阶段7：稳健性分析与最终总结
 
 ## 阶段2交付
 
-- 脚本：`build_dataset.py`
+- 脚本：`research_pipeline/build_dataset.py`
 - 数据：`data/processed/daily_panel.parquet`
 - 切分：`data/processed/split_manifest.json`
 - 字典：`data/processed/data_dictionary.md`
@@ -47,7 +48,7 @@
 
 ## 阶段3交付
 
-- 脚本：`feature_engineering.py`
+- 脚本：`research_pipeline/feature_engineering.py`
 - 特征标签表：`data/features/features_v1.parquet`
 - 特征清单：`data/features/feature_manifest.json`
 - 标签说明：`data/features/label_spec.md`
@@ -55,7 +56,7 @@
 
 ### 本次实跑结果（2026-03-31）
 
-- 运行命令：`python feature_engineering.py --drop-na-features`
+- 运行命令：`python research_pipeline/feature_engineering.py --drop-na-features`
 - 输入（阶段2）：`data/processed/daily_panel.parquet`
 - 输出行数：`22590`
 - 股票数：`19`
@@ -67,7 +68,7 @@
 
 ### 更新实跑结果（2026-04-01）
 
-- 运行命令：`python feature_engineering.py --drop-na-features --industry-feature-mode zero`
+- 运行命令：`python research_pipeline/feature_engineering.py --drop-na-features --industry-feature-mode zero`
 - 输入（阶段2，drop 后）：`data/processed/daily_panel.parquet`
 - 输出行数：`22590`
 - 股票数：`19`
@@ -76,7 +77,7 @@
 
 ## 阶段4交付
 
-- 脚本：`train_baseline.py`
+- 脚本：`research_pipeline/train_baseline.py`
 - 预测结果：`data/baseline/baseline_result.csv`
 - 指标汇总：`data/baseline/baseline_metrics.csv`
 - 实验报告：`data/baseline/baseline_report.md`
@@ -84,7 +85,7 @@
 
 ### 本次实跑结果（2026-04-01）
 
-- 运行命令：`python train_baseline.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --out data/baseline/baseline_result.csv --metrics-out data/baseline/baseline_metrics.csv --report-out data/baseline/baseline_report.md`
+- 运行命令：`python research_pipeline/train_baseline.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --out data/baseline/baseline_result.csv --metrics-out data/baseline/baseline_metrics.csv --report-out data/baseline/baseline_report.md`
 - 目标标签：`label_excess_ret_5d`
 - 预测样本：`8502` 行，覆盖 `448` 个交易日（val+test）
 - Ridge(test)：RankIC=`0.008209`，ICIR=`0.030521`，Long-Short=`-0.004053`，命中率=`0.478405`
@@ -92,7 +93,7 @@
 
 ### 阶段4.1稳健版更新（2026-04-01）
 
-- 保留 4.0 脚本不变，新增 `train_baseline_v41.py`：
+- 保留 4.0 脚本不变，新增 `research_pipeline/train_baseline_v41.py`：
   - Ridge/Tree 支持独立窗口与重训频率
   - 动态融合（`blend`）
   - 时间分段诊断（季度/月份）
@@ -110,8 +111,8 @@
 
 ## 阶段5交付
 
-- 脚本：`train_lstm.py`
-- 配置模板：`model_config.yaml`
+- 脚本：`research_pipeline/train_lstm.py`
+- 配置模板：`research_pipeline/model_config.yaml`
 - 预测结果：`data/dl/dl_result.csv`
 - 指标汇总：`data/dl/dl_metrics.csv`
 - 训练日志：`data/dl/dl_trainlog.csv`
@@ -122,7 +123,7 @@
 
 ### 本次实跑结果（2026-04-02）
 
-- 运行命令：`python train_lstm.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --out data/dl/dl_result.csv --metrics-out data/dl/dl_metrics.csv --trainlog-out data/dl/dl_trainlog.csv --report-out data/dl/dl_report.md`
+- 运行命令：`python research_pipeline/train_lstm.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --out data/dl/dl_result.csv --metrics-out data/dl/dl_metrics.csv --trainlog-out data/dl/dl_trainlog.csv --report-out data/dl/dl_report.md`
 - 目标标签：`label_excess_ret_5d`
 - 时序窗口：`seq_len=20`
 - 滚动重训：`retrain_every=40`，扩展窗口（`train_window=0`）
@@ -135,25 +136,25 @@
 
 ### 阶段5.1增强（2026-04-02）
 
-- 代码增强（`train_lstm.py`）：
+- 代码增强（`research_pipeline/train_lstm.py`）：
   - 新增 GPU 自动辨识与回退：`--device auto|cpu|cuda`（增强版）
   - 新增 GPU 筛选参数：`--gpu-index`、`--gpu-min-memory-gb`
   - 运行期增加设备探针日志（requested/selected/reason）
   - 报告新增“设备自动辨识”小节（记录 GPU 检测与回退原因）
-- 新增参数模板：`model_config.yaml`（补充 stage5.1 推荐配置）
+- 新增参数模板：`research_pipeline/model_config.yaml`（补充 stage5.1 推荐配置）
 - 新增产物：
   - `data/dl/dl_v51_result.csv`
   - `data/dl/dl_v51_metrics.csv`
   - `data/dl/dl_v51_trainlog.csv`
   - `data/dl/dl_v51_report.md`
   - `report/阶段5_1_LSTM稳健增强与GPU自动辨识报告.md`
-- 本次实跑命令：`python train_lstm.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --device auto --gpu-min-memory-gb 4 --train-window 750 --retrain-every 20 --epochs 10 --inner-val-days 40 --out data/dl/dl_v51_result.csv --metrics-out data/dl/dl_v51_metrics.csv --trainlog-out data/dl/dl_v51_trainlog.csv --report-out data/dl/dl_v51_report.md`
+- 本次实跑命令：`python research_pipeline/train_lstm.py --in data/features/features_v1.parquet --split-manifest data/processed/split_manifest.json --feature-manifest data/features/feature_manifest.json --device auto --gpu-min-memory-gb 4 --train-window 750 --retrain-every 20 --epochs 10 --inner-val-days 40 --out data/dl/dl_v51_result.csv --metrics-out data/dl/dl_v51_metrics.csv --trainlog-out data/dl/dl_v51_trainlog.csv --report-out data/dl/dl_v51_report.md`
 - 设备识别结果：`torch_cuda_available=False`，自动回退 `cpu`
 - test（LSTM v5.1）：RankIC=`-0.016379`，ICIR=`-0.060335`，Long-Short=`-0.007125`，命中率=`0.482889`
 
 ### 阶段5.2冲刺（2026-04-02）
 
-- 新增脚本：`train_lstm_v52.py`（LSTM + anchor 动态模型选择器）
+- 新增脚本：`research_pipeline/train_lstm_v52.py`（LSTM + anchor 动态模型选择器）
 - 策略思路：
   - 候选模型：`pred_lstm`（阶段5）与 `pred_tree`（阶段4.1）
   - 每个交易日按“历史滚动IC”选择当日使用 LSTM 或 anchor
@@ -166,11 +167,29 @@
   - `data/dl/dl_v52_report.md`
   - `report/阶段5_2_test指标冲刺与动态模型选择报告.md`
 - 推理所需 LSTM 权重：`data/dl/checkpoints/lstm_latest.pt`（元信息：`data/dl/checkpoints/lstm_latest_meta.json`）
-- 本次实跑命令：`python train_lstm_v52.py --lstm-result data/dl/dl_result.csv --anchor-result data/baseline/baseline_v41_result.csv --anchor-col pred_tree --lookback-days 8 --label-delay-days 7 --warmup-pick anchor --out data/dl/dl_v52_result.csv --metrics-out data/dl/dl_v52_metrics.csv --selector-log-out data/dl/dl_v52_selector_log.csv --sweep-out data/dl/dl_v52_sweep.csv --report-out data/dl/dl_v52_report.md`
+- 本次实跑命令：`python research_pipeline/train_lstm_v52.py --lstm-result data/dl/dl_result.csv --anchor-result data/baseline/baseline_v41_result.csv --anchor-col pred_tree --lookback-days 8 --label-delay-days 7 --warmup-pick anchor --out data/dl/dl_v52_result.csv --metrics-out data/dl/dl_v52_metrics.csv --selector-log-out data/dl/dl_v52_selector_log.csv --sweep-out data/dl/dl_v52_sweep.csv --report-out data/dl/dl_v52_report.md`
 - 指标对比（test，label_excess_ret_5d）：
   - 阶段5 LSTM：RankIC=`0.004885`，ICIR=`0.018072`，Long-Short=`-0.007630`
   - 阶段5.1 LSTM：RankIC=`-0.016379`，ICIR=`-0.060335`，Long-Short=`-0.007125`
   - 阶段5.2（stage5_2）：RankIC=`0.029718`，ICIR=`0.108555`，Long-Short=`0.001953`
+
+## 阶段6.0交付（2026-04-09）
+
+- 独立脚本：`research_pipeline/portfolio_backtest.py`
+- 详细报告：`report/阶段6_0_组合回测系统链路打通报告.md`
+- 输出目录：`data/backtest/stage6_0/`
+  - `comparison_metrics.csv`
+  - `backtest_report.md`
+  - `*_portfolio_nav.csv`
+  - `*_rebalance_detail.csv`
+  - `*_group_curve.csv`
+- 当前定位：仅完成“阶段5 -> 阶段6”研究链路打通，阶段6总体仍未完成。
+- 首版方法口径：
+  - 使用 `label_fwd_ret_5d` / `label_bench_ret_5d` 作为收益与基准口径
+  - 默认每 `5` 个交易日调仓一次
+  - 默认前 `20%` 高分股票等权组合
+  - 支持多信号源统一比较（如 `pred_v52` / `pred_tree` / `pred_blend`）
+- 已验证 test 样本下可产出稳定结果；其中 `stage5_2_selector` 的 net_total_return=`0.298905`、Sharpe=`1.230961`，但当前仍属于研究级简化回测，不应过度外推为实盘结论。
 
 ## 说明
 

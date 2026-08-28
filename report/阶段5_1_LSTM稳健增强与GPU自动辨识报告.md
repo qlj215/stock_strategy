@@ -42,7 +42,7 @@
 ### 3.1 运行命令
 
 ```bash
-python train_lstm.py \
+python research_pipeline/train_lstm.py \
   --in data/features/features_v1.parquet \
   --split-manifest data/processed/split_manifest.json \
   --feature-manifest data/features/feature_manifest.json \
@@ -73,7 +73,7 @@ python train_lstm.py \
 - `data/dl/dl_v51_metrics.csv`
 - `data/dl/dl_v51_trainlog.csv`
 - `data/dl/dl_v51_report.md`
-- `model_config.yaml`（新增 `stage5_1_lstm` 配置模板）
+- `research_pipeline/model_config.yaml`（新增 `stage5_1_lstm` 配置模板）
 
 ---
 
